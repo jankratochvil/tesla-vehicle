@@ -3,19 +3,32 @@ use warnings;
 use strict;
 use feature 'say';
 use POSIX;
+BEGIN {
+  $ENV{"TESLA_DEBUG_ONLINE"}="1";
+  $ENV{"TESLA_DEBUG_API_RETRY"}="1";
+}
 use Tesla::Vehicle;
+use Time::HiRes qw(time);
 require LWP::UserAgent;
 require HTTP::CookieJar::LWP;
 require JSON;
+require UUID;
 use Data::Dumper; $Data::Dumper::Deepcopy=1; $Data::Dumper::Sortkeys=1;
 use DateTime;
 $|=1;
+$ENV{"TZ"}="Europe/Prague";
+tzset();
 
 my $BATTERY_CRITICAL=45;
-my $BATTERY_MAINTAIN=50;
+my $BATTERY_OFF=50;
+my $BATTERY_ON=51;
 my $CHARGE_AMPS=5;
-my $EXTRA_ON=1.5;
-my $EXTRA_OFF=1.1;
+my $SAFETY_RATIO_BIGGER=1.5;
+my $SAFETY_RATIO_SMALLER=1.1;
+my $TESLA_TIMEOUT_CHARGING=60;
+my $TESLA_TIMEOUT_NOT_CHARGING=12*60*60;
+$BATTERY_CRITICAL<$BATTERY_OFF or die;
+$BATTERY_OFF+1==$BATTERY_ON or die;
 
 my($powerstation,$account,$pwd);
 my $fn=$ENV{"HOME"}."/.goodwe.pl";
@@ -24,6 +37,11 @@ open F,$fn or die "$fn: $!\n";
 close F or die "close $fn: $!\n";
 eval $F;
 $powerstation&&$account&&$pwd or die $fn.': need $powerstation $account $pwd'."\n";
+
+sub elapsednl($) {
+  my($t0)=@_;
+  printf " %.2fs\n",time()-$t0;
+}
 
 my($jar,$ua,%token,$api);
 sub relogin() {
@@ -61,34 +79,66 @@ sub relogin() {
   ),"No access, please log in.");
   ;
 
+  $api=undef;
   my $res2json=check($ua->post(
     "https://semsportal.com/api/v2/Common/CrossLogin",
     [
       "account"=>$account,
       "pwd"=>$pwd,
     ],
-  ),"Successful");
+  ),"Successful","Email or password error.") or return;
   $token{$_}=$res2json->{"data"}->{$_} for qw(uid timestamp token);
   retoken();
   $api=$res2json->{"api"};
 }
 
 sub data() {
-  for my $attempt (0,1) {
-    relogin() if !$api;
-    my $res3json=check($ua->post(
-      "${api}v2/PowerStation/GetMonitorDetailByPowerstationId",
-      [
-	"powerStationId"=>$powerstation,
-      ],
-    ),"success","The authorization has expired, please log in again.");
-    return $res3json->{"data"} if $res3json;
+  for my $attempt (0..30) {
+    if (!$api&&$attempt==0) {
+      print "initial login..." if !$api;
+      my $t0=time();
+      relogin();
+      print ", failed" if !$api;
+      elapsednl $t0;
+    }
+    if ($api) {
+      my $res3json=check($ua->post(
+	"${api}v2/PowerStation/GetMonitorDetailByPowerstationId",
+	[
+	  "powerStationId"=>$powerstation,
+	],
+      ),"success","The authorization has expired, please log in again.");
+      return $res3json->{"data"} if $res3json;
+      print "request on attempt $attempt failed";
+    } else {
+      print "will retry login";
+    }
+    if ($attempt) {
+      print ", sleeping";
+      sleep 30;
+    }
+    print ", relogging in";
+    my $t0=time();
     relogin();
+    print ", failed" if !$api;
+    elapsednl $t0;
   }
-  die "login twice?";
+  die "login failed";
 }
 
+sub data_retrying() {
+  for my $attempt (0..30) {
+    print "goodwe retry attempt $attempt...\n" if $attempt;
+    my $data=eval { data(); };
+    return $data if $data;
+    warn "goodwe failure: $@\n";
+  }
+}
+
+print "initial tesla fetch...";
+my $t0=time();
 my $car=Tesla::Vehicle->new(auto_wake=>1);
+elapsednl $t0;
 
 my $cmd_ran;
 my $opt_n;
@@ -116,60 +166,91 @@ while (1) {
   $now->set_time_zone("local");
   print $now->iso8601().$now->time_zone_short_name()."\n";
   $tesla_timestamp||=time();
+  print "tesla fetch";
+  my $t0=time();
   my $battery_level=$car->battery_level;
-  print "battery_level=$battery_level\n";
+  print ".";
+  my $charge_limit_soc=$car->charge_limit_soc;
+  print ".";
   my $charging_state=$car->charging_state;
+  print ".";
+  my $charge_amps=$car->charge_amps;
+  elapsednl $t0;
+  print "battery_level=$battery_level\n";
+  print "charge_limit_soc=$charge_limit_soc\n";
   print "charging_state=$charging_state\n";
   die "Battery $battery_level<$BATTERY_CRITICAL=BATTERY_CRITICAL" if $battery_level<$BATTERY_CRITICAL;
-  die "Battery $battery_level>$BATTERY_MAINTAIN=BATTERY_MAINTAIN" if $battery_level>$BATTERY_MAINTAIN;
-  my $charge_amps=$car->charge_amps;
+  die "Battery $battery_level>$BATTERY_ON=BATTERY_ON" if $battery_level>$BATTERY_ON;
+  die "Unexpected charge_limit_soc=$charge_limit_soc!=$BATTERY_ON=BATTERY_ON&&!=$BATTERY_OFF=BATTERY_OFF"
+    if $charge_limit_soc!=$BATTERY_ON&&$charge_limit_soc!=$BATTERY_OFF;
+  my $battery_on=$charge_limit_soc==$BATTERY_ON;
   die "Charging not reduced $charge_amps!=$CHARGE_AMPS=CHARGE_AMPS" if $charge_amps!=$CHARGE_AMPS;
-  die "Charging $charging_state not expected" if $charging_state!~/^(?:Charging|Complete|Stopped)$/; #"Disconnected"?
-  # This can happen for 48% or 49%
-  #die "Low battery $battery_level<$BATTERY_MAINTAIN=BATTERY_MAINTAIN but Complete?" if $battery_level<$BATTERY_MAINTAIN&&$charging_state eq "Complete";
+  my $charging=$charging_state eq "Charging";
+  die "Charging $charging_state not expected" if $charging_state!~/^(?:Charging|Complete)$/; #(?:Stopped|Disconnected)?
   my $wanted;
   my $sleep;
   my $hour=(localtime)[2];
   my $day=$hour>=6&&$hour<18;
   print "day=".($day?1:0)."\n";
-  if ($battery_level>=$BATTERY_MAINTAIN&&$charging_state ne "Charging") {
+  if ($battery_level>=$BATTERY_ON&&!$charging) {
     $wanted=0;
-    $sleep=24*60*60;
+    $sleep=$TESLA_TIMEOUT_NOT_CHARGING;
+    print "kept no charging as battery_level=$battery_level>=$BATTERY_ON=BATTERY_ON\n";
   } else {
-    my $data=data();
+    print "goodwe fetch...\n";
+    my $t0=time();
+    my $data=data_retrying();
+    print "goodwe fetch done";
+    elapsednl $t0;
     my $pmeter=$data->{"inverter"}[0]{"invert_full"}{"pmeter"};
     die Dumper $data."\n!pmeter" if !defined $pmeter;
+    $pmeter=sprintf "%+d",$pmeter;
     print "pmeter=$pmeter\n";
-    if ($charging_state eq "Charging") {
-      my $data=data();
-      my $limit=$CHARGE_AMPS*230*3*($EXTRA_OFF-1);
+    if ($charging) {
+      my $limit=$CHARGE_AMPS*230*3*($SAFETY_RATIO_SMALLER-1);
       $wanted=$pmeter>$limit;
-      print "Stopping charging as pmeter=$pmeter<=$limit=limit\n" if !$wanted;
+      if (!$battery_on) {
+	print "warning: Charging despite not wanting to!\n";
+      } elsif (!$wanted) {
+	print "stopping charging as pmeter=$pmeter<=$limit=limit\n";
+      } else {
+	print "kept charging as pmeter=$pmeter>$limit=limit\n";
+      }
       $sleep=15;
-    } elsif ($charging_state eq "Complete") {
-      # We are at 48% or 49%
-      my $limit=$CHARGE_AMPS*230*3*$EXTRA_OFF;
+    # !$charging&&$battery_level<$BATTERY_ON
+    } elsif ($battery_on) {
+      my $limit=$CHARGE_AMPS*230*3*$SAFETY_RATIO_SMALLER;
       $wanted=$pmeter>$limit;
-      print "Stopping charging as pmeter=$pmeter<=$limit=limit\n" if !$wanted;
-      $sleep=1*60;
-    } else {
-      die if $charging_state ne "Stopped";
-      # We are at 48% or 49%
-      my $limit=$CHARGE_AMPS*230*3*$EXTRA_ON;
+      if (!$wanted) {
+	print "stopped Tesla-unfulfilled desire to charge as pmeter=$pmeter<=$limit=limit\n" if !$wanted;
+      } else {
+	print "kept Tesla-unfulfilled desire to charge as pmeter=$pmeter>$limit=limit\n";
+      }
+      $sleep=60;
+    } else { # $battery_off
+      my $limit=$CHARGE_AMPS*230*3*$SAFETY_RATIO_BIGGER;
       $wanted=$pmeter>$limit;
-      print "Resuming charging as pmeter=$pmeter>$limit=limit\n" if $wanted;
-      $sleep=$day?10*60:60*60;
+      if ($wanted) {
+	print "started Tesla-unfulfilled desire to charge as pmeter=$pmeter>$limit=limit\n";
+      } else {
+	print "kept no desire to charge as pmeter=$pmeter<=$limit=limit\n";
+      }
+      $sleep=$wanted?60:($day?5*60:60*60);
     }
   }
   print "wanted=".($wanted?1:0)." sleep=$sleep\n";
-  if ($wanted!=($charging_state ne "Stopped")) {
-    die if !cmd "charge_".($wanted?"on":"off");
+  $wanted=$wanted?$BATTERY_ON:$BATTERY_OFF;
+  if ($wanted!=$charge_limit_soc) {
+    my $t0=time();
+    cmd "charge_limit_set",$wanted or die;
+    print "cmd";
+    elapsednl $t0;
     $tesla_timestamp=undef;
     $sleep=60;
   }
   print "sleep=$sleep\n";
   die if $sleep!=sleep $sleep;
-  if ($tesla_timestamp&&time()-$tesla_timestamp>23*60*60) {
+  if ($tesla_timestamp&&time()-$tesla_timestamp>($charging?$TESLA_TIMEOUT_CHARGING:$TESLA_TIMEOUT_NOT_CHARGING)-10) {
     print "Tesla data have expired.\n";
     $car->api_cache_clear;
     $tesla_timestamp=undef;
