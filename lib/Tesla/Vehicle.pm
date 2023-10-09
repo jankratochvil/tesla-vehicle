@@ -596,7 +596,9 @@ sub wake {
         my $wakeup_called_at = time;
         my $wake_interval = WAKE_INTERVAL;
 
-        while (! $self->online) {
+        while (1) {
+	    $self->api_cache_clear;
+	    last if $self->online;
             select(undef, undef, undef, $wake_interval);
             if ($wakeup_called_at + WAKE_TIMEOUT - $wake_interval < time) {
                 printf(
