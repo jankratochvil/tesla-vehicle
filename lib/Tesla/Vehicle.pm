@@ -125,7 +125,7 @@ sub data {
         return {};
     }
 
-    if (! defined $data->{drive_state}{shift_state}) {
+    if (! defined $data->{drive_state}{timestamp}) {
 
         for (1 .. API_RETRIES) {
             print "API retry attempt $_\n" if DEBUG_API_RETRY;
@@ -134,7 +134,7 @@ sub data {
 
             $data = $self->api(endpoint => 'VEHICLE_DATA', id => $self->id);
 
-            if (defined $data->{drive_state}{shift_state}) {
+            if (defined $data->{drive_state}{timestamp}) {
                 last;
             }
         }
@@ -153,6 +153,9 @@ sub state {
 }
 sub summary {
     return $_[0]->api(endpoint => 'VEHICLE_SUMMARY', id => $_[0]->id);
+}
+sub charge_history {
+    return $_[0]->api(endpoint => 'VEHICLE_CHARGE_HISTORY', id => $_[0]->id);
 }
 sub charge_state {
     my ($self) = @_;
@@ -304,7 +307,7 @@ sub charging_sites_nearby {
 }
 sub charging_state {
         return $_[0]->data->{charge_state}{charging_state};
-    }
+}
 sub minutes_to_full_charge {
     return $_[0]->data->{charge_state}{minutes_to_full_charge};
 }
@@ -831,7 +834,9 @@ sub wake {
         my $wakeup_called_at = time;
         my $wake_interval = WAKE_INTERVAL;
 
-        while (! $self->online) {
+        while (1) {
+	    $self->api_cache_clear;
+	    last if $self->online;
             select(undef, undef, undef, $wake_interval);
             if ($wakeup_called_at + WAKE_TIMEOUT - $wake_interval < time) {
                 printf(
@@ -1164,7 +1169,7 @@ Example return:
 
 =head1 COMMAND METHODS
 
-All command methods return a true value (C<1>)if the operation was successful,
+All command methods return a true value (C<1>) if the operation was successful,
 and a false value (C<0>) if the command failed.
 
 We will also print to C<STDOUT> the reason for the failure if one occurred.
@@ -1412,6 +1417,13 @@ things like whether the car is locked, whether there is media playing, the
 odometer reading, whether sentry mode is enabled or not etc.
 
 I<Return>: Hash reference.
+
+=head2 charge_history
+
+Returns raw information on the charge history of the vehicle.
+
+There is no internal mechanism that organizes the data; it's up to the user to
+decipher the data currently.
 
 =head2 charge_state
 
