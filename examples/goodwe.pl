@@ -4,8 +4,10 @@ use strict;
 use feature 'say';
 use POSIX;
 BEGIN {
-  $ENV{"TESLA_DEBUG_ONLINE"}="1";
+  *CORE::GLOBAL::exit=sub(;$) { die "exit(@_) override"; };
+  $ENV{"TESLA_DEBUG_ONLINE"}="0";
   $ENV{"TESLA_DEBUG_API_RETRY"}="1";
+  $ENV{"DEBUG_TESLA_API_CACHE"}="1";
 }
 use Tesla::Vehicle;
 use Time::HiRes qw(time);
@@ -61,12 +63,12 @@ sub relogin() {
     $ua->default_header("Token"=>JSON::encode_json(\%token));
   }
   retoken();
-  sub check($$;$) {
-    my($res,$msg,$msg2)=@_;
+  sub check($$;$$) {
+    my($res,$msg,@msg2)=@_;
     die $res->as_string() if !$res->is_success();
     my $json=JSON::decode_json($res->content());
     die "res hasError" if $json->{"hasError"};
-    return undef if $msg2&&$json->{"msg"} eq $msg2;
+    do { return undef if $_&&$json->{"msg"} eq $_; } for @msg2;
     die "res msg '".$json->{"msg"}."'!='$msg'" if $json->{"msg"} ne $msg;
     return $json;
   }
@@ -107,7 +109,7 @@ sub data() {
 	[
 	  "powerStationId"=>$powerstation,
 	],
-      ),"success","The authorization has expired, please log in again.");
+      ),"success","The authorization has expired, please log in again.","No access, please log in.");
       return $res3json->{"data"} if $res3json;
       print "request on attempt $attempt failed";
     } else {
@@ -126,18 +128,24 @@ sub data() {
   die "login failed";
 }
 
-sub data_retrying() {
-  for my $attempt (0..30) {
-    print "goodwe retry attempt $attempt...\n" if $attempt;
-    my $data=eval { data(); };
-    return $data if $data;
-    warn "goodwe failure: $@\n";
+sub retry($) {
+  my($func)=@_;
+  for my $attempt (0..1000000) {
+    print "retry attempt $attempt...\n" if $attempt;
+    $@=undef;
+    my $retval=eval { &{$func}(); };
+    return $retval if !$@;
+    warn "failure: $@\n";
   }
 }
 
 print "initial tesla fetch...";
 my $t0=time();
-my $car=Tesla::Vehicle->new(auto_wake=>1);
+my $car=Tesla::Vehicle->new(
+  "auto_wake"=>1,
+  # We do our own $car->api_cache_clear().
+  "api_cache_persist"=>1,
+);
 elapsednl $t0;
 
 my $cmd_ran;
@@ -154,7 +162,7 @@ sub cmd($@) {
   } else {
     $rhs=$car->$cmd(@args);
     $rhs="ok" if $setter&&$rhs&&$rhs eq 1;
-    $rhs.=$suffixr{$cmd}//"";
+    $rhs.=$suffixr{$cmd}//"" if $rhs;
   }
   say join(" ",$cmd,map $_//"undef",@args).($suffixl{$cmd}//"").": $rhs";
   return $rhs;
@@ -166,15 +174,18 @@ while (1) {
   $now->set_time_zone("local");
   print $now->iso8601().$now->time_zone_short_name()."\n";
   $tesla_timestamp||=time();
+  my($battery_level,$charge_limit_soc,$charging_state,$charge_amps);
   print "tesla fetch";
   my $t0=time();
-  my $battery_level=$car->battery_level;
-  print ".";
-  my $charge_limit_soc=$car->charge_limit_soc;
-  print ".";
-  my $charging_state=$car->charging_state;
-  print ".";
-  my $charge_amps=$car->charge_amps;
+  retry sub {
+    $battery_level=$car->battery_level;
+    print ".";
+    $charge_limit_soc=$car->charge_limit_soc;
+    print ".";
+    $charging_state=$car->charging_state;
+    print ".";
+    $charge_amps=$car->charge_amps;
+  };
   elapsednl $t0;
   print "battery_level=$battery_level\n";
   print "charge_limit_soc=$charge_limit_soc\n";
@@ -199,7 +210,7 @@ while (1) {
   } else {
     print "goodwe fetch...\n";
     my $t0=time();
-    my $data=data_retrying();
+    my $data=retry \&data;
     print "goodwe fetch done";
     elapsednl $t0;
     my $pmeter=$data->{"inverter"}[0]{"invert_full"}{"pmeter"};
@@ -241,17 +252,27 @@ while (1) {
   print "wanted=".($wanted?1:0)." sleep=$sleep\n";
   $wanted=$wanted?$BATTERY_ON:$BATTERY_OFF;
   if ($wanted!=$charge_limit_soc) {
+    $tesla_timestamp=undef;
     my $t0=time();
-    cmd "charge_limit_set",$wanted or die;
+    retry sub {
+warn "calling api_cache_clear";
+      $car->api_cache_clear;
+warn "calling api_cache_clear done";
+      cmd "charge_limit_set",$wanted or die;
+    };
     print "cmd";
     elapsednl $t0;
-    $tesla_timestamp=undef;
     $sleep=60;
   }
   print "sleep=$sleep\n";
-  die if $sleep!=sleep $sleep;
-  if ($tesla_timestamp&&time()-$tesla_timestamp>($charging?$TESLA_TIMEOUT_CHARGING:$TESLA_TIMEOUT_NOT_CHARGING)-10) {
-    print "Tesla data have expired.\n";
+  my $slept=sleep $sleep;
+  warn "slept=$slept!=$sleep=sleep" if $slept!=$sleep;
+  my $age=int(time()-$tesla_timestamp) if $tesla_timestamp;
+  my $limit=($charging?$TESLA_TIMEOUT_CHARGING:$TESLA_TIMEOUT_NOT_CHARGING)-10;
+  if ($age&&$age<$limit) {
+    print "tesla data is still valid, age=$age<$limit=limit\n";
+  } else {
+    print "tesla data has expired, age=".(!defined $age?"undef":$age).">=$limit=limit\n";
     $car->api_cache_clear;
     $tesla_timestamp=undef;
   }
