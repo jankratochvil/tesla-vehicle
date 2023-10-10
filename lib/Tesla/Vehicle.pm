@@ -379,10 +379,6 @@ sub preconditioning {
     return ($_[0]->data->{charge_state}{scheduled_departure_time_minutes} - 15) % (24*60);
 }
 
-sub charge_history {
-    return $_[0]->api(endpoint => 'VEHICLE_CHARGE_HISTORY', id => $_[0]->id);
-}
-
 # Command Related Methods
 
 sub charge_limit_set {
