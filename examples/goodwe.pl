@@ -7,7 +7,7 @@ BEGIN {
   *CORE::GLOBAL::exit=sub(;$) { die "exit(@_) override"; };
   $ENV{"TESLA_DEBUG_ONLINE"}="0";
   $ENV{"TESLA_DEBUG_API_RETRY"}="1";
-  $ENV{"DEBUG_TESLA_API_CACHE"}="1";
+  $ENV{"DEBUG_TESLA_API_CACHE"}="0";
 }
 use Tesla::Vehicle;
 use Time::HiRes qw(time);
@@ -29,6 +29,10 @@ my $SAFETY_RATIO_BIGGER=1.5;
 my $SAFETY_RATIO_SMALLER=1.1;
 my $TESLA_TIMEOUT_CHARGING=60;
 my $TESLA_TIMEOUT_NOT_CHARGING=12*60*60;
+my $WATT_PER_AMP_1=770;
+my $AMP_TOP=16;
+my $WATT_PER_AMP_TOP=733;
+
 $BATTERY_CRITICAL<$BATTERY_OFF or die;
 $BATTERY_OFF+1==$BATTERY_ON or die;
 
@@ -139,6 +143,15 @@ sub retry($) {
   }
 }
 
+sub data_retried() {
+  print "goodwe fetch...\n";
+  my $t0=time();
+  my $data=retry \&data;
+  print "goodwe fetch done";
+  elapsednl $t0;
+  return $data;
+}
+
 print "initial tesla fetch...";
 my $t0=time();
 my $car=Tesla::Vehicle->new(
@@ -168,11 +181,96 @@ sub cmd($@) {
   return $rhs;
 }
 
-my $tesla_timestamp;
-while (1) {
+sub print_timestamp() {
   my $now=DateTime->now();
   $now->set_time_zone("local");
   print $now->iso8601().$now->time_zone_short_name()."\n";
+}
+
+if (@ARGV>=1&&$ARGV[0] eq "--calibrate") {
+  shift;
+  for my $amps (@ARGV) {
+    $car->api_cache_clear;
+    my $charging_state=$car->charging_state;
+    print "charging_state=$charging_state\n";
+    $car->charging_state eq "Complete" or die "!Complete";
+    sub load_get() {
+      my $data=data_retried();
+      my $load=$data->{"powerflow"}{"load"};
+      $load=~s/^(\d+(?:[.]\d+)?)[(]W[)]$/$1/ or die "load=<$load>!=\\d(W)";
+      return $load;
+    }
+    my $load0=load_get();
+    my $t0=time();
+    print_timestamp();
+    my $battery_level=$car->battery_level;
+    print "battery_level=$battery_level\n";
+    die "!(50<=battery_level<=90)" if $battery_level<50||$battery_level>90;
+    my $soc=$battery_level+3;
+    die "!(50<=soc<=90)" if $soc<50||$soc>90;
+    my $charge_current_request=$car->charge_current_request;
+    print "charge_current_request=$charge_current_request\n";
+    $amps==$charge_current_request or cmd "charge_amps_set",$amps or die;
+    my $charge_limit_soc=$car->charge_limit_soc;
+    print "charge_limit_soc=$charge_limit_soc\n";
+    $charge_limit_soc==$soc or cmd "charge_limit_set",$soc or die;
+    sub load_wait($$) {
+      my($sub,$expect)=@_;
+      my $waited=0;
+      while (1) {
+	my $load=load_get();
+	print "load=$load expecting $expect waited ${waited}s\n";
+	# sometimes $load==0
+	return $load if $load&&&{$sub}($load);
+	my $slept=sleep 15;
+	next if ($waited+=$slept)<10*60;
+	cmd "charge_limit_set",50;
+	die "Timeout $waited seconds waiting for increased load";
+      }
+    }
+    # FIXME: $car->charger_phases
+    my $expected=($amps*3*230)/2;
+    my $compare=$load0+$expected;
+    my $load1=load_wait sub { my($load)=@_; return $load>$compare; },$compare;
+    my $t1=time();
+    print_timestamp();
+    cmd "charge_limit_set",50 or die "Cannot stop charging";
+    # $load1-$expected does not work well, there is some residual
+    # RESULT:  4A:   365 (100s)  3380 ( +3014 vs. 0) ( 83s)   854( +489 vs. 0):  2770 (1 vs. avg(0 2))
+    $compare=$load0+100;
+    my $load2=load_wait sub { my($load)=@_; return $load<$compare; },$compare;
+    my $t2=time();
+    print_timestamp();
+    $charging_state=$car->charging_state;
+    print "charging_state=$charging_state\n";
+    $car->charging_state eq "Complete" or die "!Complete";
+    my $diff10=$load1-$load0;
+    my $diff102=$load1-($load0+$load2)/2;
+    printf "RESULT: %2dA: %5d (%3ds) %5d (%+6d/%2dA=%+4d vs. 0) (%3ds) %5d(%+6d vs. 0): %5d/%2dA=%3d (1 vs. avg(0 2))\n",
+      $amps,$load0,$t1-$t0,$load1,$diff10,$amps,$diff10/$amps,$t2-$t1,$load2,$load2-$load0,$diff102,$amps,$diff102/$amps;
+  }
+  print "done\n";
+  exit 0;
+}
+die "$0: [--calibrate]\n" if @ARGV;
+
+sub amps_to_watt($) {
+  my($amps)=@_;
+  die $amps if $amps<1;
+  die $amps if $amps!=int($amps);
+  return $amps*($WATT_PER_AMP_1+($WATT_PER_AMP_TOP-$WATT_PER_AMP_1)*($amps-1)/($AMP_TOP-1));
+}
+sub watt_to_amp($$) {
+  my($watt,$amp_top)=@_;
+  for my $amps (reverse 1..$amp_top) {
+    return $amps if $watt>=amps_to_watt $amps;
+  }
+  return 0;
+}
+
+my $tesla_timestamp;
+while (1) {
+  print_timestamp();
   $tesla_timestamp||=time();
   my($battery_level,$charge_limit_soc,$charging_state,$charge_amps);
   print "tesla fetch";
@@ -208,11 +306,7 @@ while (1) {
     $sleep=$TESLA_TIMEOUT_NOT_CHARGING;
     print "kept no charging as battery_level=$battery_level>=$BATTERY_ON=BATTERY_ON\n";
   } else {
-    print "goodwe fetch...\n";
-    my $t0=time();
-    my $data=retry \&data;
-    print "goodwe fetch done";
-    elapsednl $t0;
+    my $data=data_retried();
     my $pmeter=$data->{"inverter"}[0]{"invert_full"}{"pmeter"};
     die Dumper $data."\n!pmeter" if !defined $pmeter;
     $pmeter=sprintf "%+d",$pmeter;
@@ -255,9 +349,9 @@ while (1) {
     $tesla_timestamp=undef;
     my $t0=time();
     retry sub {
-warn "calling api_cache_clear";
+      #warn "calling api_cache_clear";
       $car->api_cache_clear;
-warn "calling api_cache_clear done";
+      #warn "calling api_cache_clear done";
       cmd "charge_limit_set",$wanted or die;
     };
     print "cmd";

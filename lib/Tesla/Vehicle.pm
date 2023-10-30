@@ -244,6 +244,12 @@ sub charge_amps {
 sub charge_actual_current {
     return $_[0]->data->{charge_state}{charge_actual_current} // 0;
 }
+sub charge_current_request {
+    return $_[0]->data->{charge_state}{charge_current_request};
+}
+sub charge_current_request_max {
+    return $_[0]->data->{charge_state}{charge_current_request_max};
+}
 sub charge_limit_soc {
     return $_[0]->data->{charge_state}{charge_limit_soc};
 }
@@ -370,6 +376,30 @@ sub charge_limit_set {
 
     if (! $return->{result} && $self->warn) {
         print "Couldn't set charge limit: '$return->{reason}'\n";
+    }
+
+    return $return->{result};
+}
+
+sub charge_amps_set {
+    my ($self, $amps) = @_;
+
+    if (! defined $amps || $amps !~ /^\d+$/) {
+        croak "charge_amps_set() requires an amps integer";
+    }
+
+    $self->_online_check;
+
+    my $return = $self->api(
+        endpoint    => 'CHARGING_AMPS',
+        id          => $self->id,
+        api_params  => { charging_amps => $amps }
+    );
+
+    $self->api_cache_clear;
+
+    if (! $return->{result} && $self->warn) {
+        print "Couldn't set charging amps: '$return->{reason}'\n";
     }
 
     return $return->{result};
@@ -1256,6 +1286,15 @@ current charger connection.
 
 Returns a float indicating how many Amps are actually being drawn through the
 charger.
+
+=head2 charge_current_request
+
+Returns an integer indicating number of amperes to charge the car.
+
+=head2 charge_current_request_max
+
+Returns an integer indicating maximum number of amperes supported for charging
+the car.
 
 =head2 charge_limit_soc
 
