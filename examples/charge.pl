@@ -7,7 +7,7 @@ use Tesla::Vehicle;
 use Data::Dumper; $Data::Dumper::Deepcopy=1; $Data::Dumper::Sortkeys=1;
 $|=1;
 
-my $TEMPERATURE=23;
+my $temperature=23;
 my $MINUTES_PER_PERCENT=4.1;
 my $MINUTES_PER_PERCENT_AMPS=16;
 my $PHASES_DEFAULT=3;
@@ -59,6 +59,10 @@ sub doors() {
   my $doors=join ", ",map $_==0?"closed":"open$_",map $car->state->{"${_}"},qw(df pf dr pr);
   $doors=~s/^([^,]+)(?:, \1)+$/all $1/;
   say "Doors are $doors." if $doors ne "all closed";
+  my $ft=$car->state->{"ft"};
+  warn "ft $ft!=0&&$ft!=16" if $ft!=0&&$ft!=16;
+  say "Front trunk is open." if $car->state->{"ft"};
+  say "Rear trunk is open." if $car->state->{"rt"};
 }
 sub phases() {
   return $PHASES_DEFAULT if !defined $car->charger_phases;
@@ -73,7 +77,7 @@ sub state() {
   doors;
   if ($car->is_climate_on) {
     say "Car conditioning is on.";
-    say "Temperature set to ".$car->temperature_setting_driver." != $TEMPERATURE." if $car->temperature_setting_driver!=$TEMPERATURE;
+    say "Temperature set to ".$car->temperature_setting_driver." != $temperature." if $car->temperature_setting_driver!=$temperature;
     say "warning: temperature_setting_passenger ".$car->temperature_setting_passenger." != ".$car->temperature_setting_driver." temperature_setting_driver"
       if $car->temperature_setting_passenger!=$car->temperature_setting_driver;
   }
@@ -98,6 +102,7 @@ my $minutes_want_from;
 my $minutes_want_to;
 my $precondition;
 my $reset;
+my $reset_temp;
 my $windows_want;
 my $auto_wake=1;
 my $battery_direct;
@@ -117,12 +122,17 @@ for my $arg (@ARGV) {
     } else {
       die "Excessive battery/time: $arg";
     }
+  } elsif ($arg=~/^\d+$/&&$arg>=15&&$arg<=28) {
+    $temperature=$arg;
   } elsif ($arg=~/^(@?)($timere)$/o) {
     ($1?$minutes_want_from:$minutes_want_to)=time_to_minutes $2;
   } elsif ($arg=~/^p([01])?$/) { # precondition
     $precondition=$1//1;
   } elsif ($arg eq "r") {
     $reset=1;
+  } elsif ($arg eq "R") {
+    $reset=1;
+    $reset_temp=1;
   } elsif ($arg eq "s") { # sleep
     $auto_wake=0;
   } elsif ($arg=~/^b([01])?$/) { # battery-on/off
@@ -203,13 +213,10 @@ my($sec,$min,$hour)=localtime;
 my $minutes=$min+$hour*60;
 $battery_want//=50 if $reset;
 my $battery_done=$car->battery_level>=($battery_want||$car->charge_limit_soc);
+# Prevent false time estimate if Complete and battery is only slightly charged less, not yet recharging.
+$battery_done||=1 if !$battery_want&&$car->charging_state eq "Complete";
 $battery_want//=50 if $battery_done;
 $battery_want//=$car->charge_limit_soc;
-# Prevent false warning if Complete and $battery_want is going to set higher SoC.
-if (!$battery_want&&$car->charging_state eq "Complete") {
-  say "warning: Charging==Complete but SoC=".$car->battery_level." + 3 < $battery_want=want!" if $car->battery_level+3<$battery_want;
-  $battery_done||=1;
-}
 $time_want//=$battery_want;
 $minutes_want_to//=$minutes_want_from;
 $sentry//=$lock;
@@ -224,12 +231,12 @@ my $is_climate_on=$car->is_climate_on;
 my $scheduled_charging=$car->scheduled_charging;
 my $charge_limit_soc=$car->charge_limit_soc;
 my $charge_current_request=$car->charge_current_request;
-cmd "temperatures_set",$TEMPERATURE if ($car->temperature_setting_driver!=$TEMPERATURE||$car->temperature_setting_passenger!=$TEMPERATURE)
-  &&($precondition||$conditioning||$reset);
+cmd "temperatures_set",$temperature if ($car->temperature_setting_driver!=$temperature||$car->temperature_setting_passenger!=$temperature)
+  &&($precondition||$conditioning||$reset_temp);
 if ($precondition) {
   cmd "preconditioning_set",$minutes_want_to if ($preconditioning//-1)!=$minutes_want_to;
   $preconditioning=$minutes_want_to;
-} elsif ($reset||$is_climate_on||defined $minutes_want_to||defined $precondition) {
+} elsif ($reset_temp||$is_climate_on||defined $minutes_want_to||defined $precondition) {
   cmd "preconditioning_set",undef if defined $preconditioning;
   $preconditioning=undef;
 }
@@ -237,7 +244,8 @@ if ($amps) {
   cmd "charge_amps_set",$amps if $amps!=$charge_current_request;
   $charge_current_request=$amps;
 }
-say "warning: Calculating battery time with only ".phases."x${amps}A/".$car->charge_current_request_max."A!" if ($amps&&$amps!=$MINUTES_PER_PERCENT_AMPS)||phases!=$PHASES_DEFAULT;
+say "warning: Calculating battery time with only ".phases."x${amps}A/".$car->charge_current_request_max."A!"
+  if !$battery_done&&(($amps&&$amps!=$MINUTES_PER_PERCENT_AMPS)||phases!=$PHASES_DEFAULT);
 my $MINUTES_PER_PERCENT_amps=$MINUTES_PER_PERCENT*($MINUTES_PER_PERCENT_AMPS*$PHASES_DEFAULT-$OVERHEAD_1PAMPS)/($amps*phases-$OVERHEAD_1PAMPS);
 my    $time_minutes_fullamps;
 my $battery_minutes_fullamps;
@@ -315,7 +323,7 @@ if (($windows//-3)!=($windows_want//$windows//-3)) {
     sleep 2;
   }
 }
-cmd "climate_".($conditioning?"on":"off") if defined $conditioning||($reset&&$is_climate_on);
+cmd "climate_".($conditioning?"on":"off") if defined $conditioning||($reset_temp&&$is_climate_on);
 cmd "charge_" .($battery_direct?"on":"off") if defined $battery_direct;
 cmd "doors_".($lock?"lock":"unlock") if defined $lock;
 cmd "sentry_".($sentry?"on":"off") if defined $sentry;
