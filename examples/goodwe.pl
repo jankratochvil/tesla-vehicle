@@ -18,8 +18,8 @@ require UUID;
 use Data::Dumper; $Data::Dumper::Deepcopy=1; $Data::Dumper::Sortkeys=1;
 use DateTime;
 use List::Util qw(min max);
+require Geo::Location::TimeZone;
 $|=1;
-my $orig_tz=$ENV{"TZ"};
 
 my $HOME_LAT;
 my $HOME_LON;
@@ -186,25 +186,18 @@ sub cmd($@) {
 
 sub print_timestamp(;$) {
   my($offset)=@_;
-  # FIXME
-  $ENV{"TZ"}=$orig_tz;
-  tzset();
   my $now=DateTime->now(
     "time_zone"=>"local",
   );
-  # FIXME
-  $ENV{"TZ"}=$TZ;
-  tzset();
   $now->add("seconds"=>$offset) if $offset;
-  print $now->iso8601().$now->time_zone_short_name();
   if ($TZ) {
     my $nowtz=DateTime->now(
       "time_zone"=>$TZ,
     );
     $nowtz->add("seconds"=>$offset) if $offset;
-    print " ".$nowtz->iso8601().$nowtz->time_zone_short_name() if $now->offset()!=$nowtz->offset();
+    print $nowtz->iso8601().$nowtz->time_zone_short_name()." " if $now->offset()!=$nowtz->offset();
   }
-  print "\n";
+  print $now->iso8601().$now->time_zone_short_name()."\n";
 }
 
 if (@ARGV>=1&&$ARGV[0] eq "--calibrate") {
@@ -300,6 +293,7 @@ sub distance($$) {
 }
 
 my $tesla_timestamp;
+my $geo=Geo::Location::TimeZone->new();
 while (1) {
   print_timestamp();
   $tesla_timestamp||=time();
@@ -329,6 +323,8 @@ while (1) {
   my $distance=distance $latitude,$longitude;
   my $at_home=$distance<$HOME_DISTANCE?1:0;
   print "latitude,longitude=$latitude,$longitude;distance=$distance,max=$HOME_DISTANCE,at_home=$at_home\n";
+  $TZ=$geo->lookup("lat"=>$latitude,"lon"=>$longitude);
+  print "TZ=$TZ\n";
   print "charge_port_latch=$charge_port_latch\n";
   print "battery_level=$battery_level%\n";
   print "charge_limit_soc=$charge_limit_soc%\n";
@@ -352,8 +348,10 @@ while (1) {
   my $day_start_hour=9;
   my $day_stop_hour =16;
   sub day() {
-    # FIXME: Use DateTime?
-    my $hour=(localtime)[2];
+    my $nowtz=DateTime->now(
+      "time_zone"=>$TZ,
+    );
+    my $hour=$nowtz->hour();
     return $hour>=$day_start_hour&&$hour<$day_stop_hour;
   }
   my $day=day();
@@ -435,13 +433,12 @@ while (1) {
   print_timestamp;
   print "sleep=$sleep\n";
   if (!day()) {
-    # FIXME: Use DateTime?
-    my @localtime=localtime;
-    my $hourref=\$localtime[2];
-    $$hourref=$day_start_hour+($$hourref<$day_start_hour?0:24);
-    $localtime[1]=0; #min
-    $localtime[0]=5; #sec
-    my $sleep_to_day=mktime(@localtime)-int(time());
+    my $nowtz=DateTime->now(
+      "time_zone"=>$TZ,
+    );
+    my $hour=$nowtz->hour();
+    $hour=$day_start_hour+($hour<$day_start_hour?0:24);
+    my $sleep_to_day=($hour-$nowtz->hour())*3600+(0-$nowtz->minute())*60+(5-$nowtz->second())*1;
     if ($sleep_to_day<60) {
       print "sleep_to_day=$sleep_to_day ignored as it is too short.\n";
     } elsif ($sleep_to_day<$sleep) {
