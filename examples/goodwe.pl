@@ -35,6 +35,7 @@ my $WATT_PER_AMP_1=770;
 my $AMP_TOP=16;
 my $WATT_PER_AMP_TOP=733;
 my $TZ;
+my $VOLTS=230; # FIXME
 
 $BATTERY_CRITICAL<$BATTERY_LOW or die;
 $BATTERY_LOW+1==$BATTERY_HIGH or die;
@@ -245,8 +246,7 @@ if (@ARGV>=1&&$ARGV[0] eq "--calibrate") {
 	die "Timeout $waited seconds waiting for increased load";
       }
     }
-    # FIXME: $car->charger_phases
-    my $expected=($amps*3*230)/2;
+    my $expected=($amps*$car->charger_phases*$VOLTS)/2;
     my $compare=$load0+$expected;
     my $load1=load_wait sub { my($load)=@_; return $load>$compare; },$compare;
     my $t1=time();
@@ -297,7 +297,7 @@ my $geo=Geo::Location::TimeZone->new();
 while (1) {
   print_timestamp();
   $tesla_timestamp||=time();
-  my($battery_level,$charge_limit_soc,$charging_state,$charge_amps,$charge_current_request,$charge_actual_current,$latitude,$longitude,$charge_port_latch);
+  my($battery_level,$charge_limit_soc,$charging_state,$charge_amps,$charge_current_request,$charge_actual_current,$latitude,$longitude,$charge_port_latch,$charger_phases);
   print "tesla fetch";
   my $t0=time();
   retry sub {
@@ -318,6 +318,8 @@ while (1) {
     $longitude=$car->longitude;
     print ".";
     $charge_port_latch=$car->charge_port_latch;
+    print ".";
+    $charger_phases=$car->charger_phases;
   };
   elapsednl $t0;
   my $distance=distance $latitude,$longitude;
@@ -330,6 +332,7 @@ while (1) {
   print "charge_limit_soc=$charge_limit_soc%\n";
   print "charge_amps=${charge_amps}A\n";
   print "WARNING: charge_current_request=$charge_current_request!=$charge_amps=charge_amps\n" if $charge_current_request!=$charge_amps;
+  print "charger_phases=$charger_phases\n";
   print "charging_state=$charging_state\n";
   die "Battery $battery_level<$BATTERY_CRITICAL=BATTERY_CRITICAL" if $battery_level<$BATTERY_CRITICAL;
   #die "Battery $battery_level>$BATTERY_HIGH=BATTERY_HIGH" if $battery_level>$BATTERY_HIGH;
@@ -397,8 +400,9 @@ while (1) {
     print "pmeter=$pmeter\n";
     my $amps_old_watt=amps_to_watt $amps_old;
     my $pmeter_real=$pmeter+$amps_old_watt;
-    my $limit_watt_low =$amps_old*230*3*($SAFETY_RATIO_SMALLER-1);
-    my $limit_watt_high=$amps_old*230*3*($SAFETY_RATIO_BIGGER -1);
+    my $limit_watt_base=$amps_old*$VOLTS*$charger_phases;
+    my $limit_watt_low =$limit_watt_base*($SAFETY_RATIO_SMALLER-1);
+    my $limit_watt_high=$limit_watt_base*($SAFETY_RATIO_BIGGER -1);
     print "pmeter=$pmeter amps_old=$amps_old amps_old_watt=$amps_old_watt\n";
     print "pmeter_real: limit_watt_low=$limit_watt_low(==*$SAFETY_RATIO_SMALLER)?$pmeter_real?$limit_watt_high(==*$SAFETY_RATIO_BIGGER)=limit_watt_high\n";
     if ($pmeter_real<$limit_watt_low||$pmeter_real>$limit_watt_high) {

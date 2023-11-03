@@ -250,6 +250,16 @@ sub charge_current_request {
 sub charge_current_request_max {
     return $_[0]->data->{charge_state}{charge_current_request_max};
 }
+sub charger_phases {
+    my $retval = $_[0]->data->{charge_state}{charger_phases};
+    return $retval if !defined $retval || $retval == 1;
+    if ($retval != 2) {
+	print "Unknown number of phases $retval\n";
+	return undef;
+    }
+    return 3 if $_[0]->data->{vehicle_config}{eu_vehicle};
+    return 2;
+}
 sub charge_limit_soc {
     return $_[0]->data->{charge_state}{charge_limit_soc};
 }
@@ -1298,6 +1308,11 @@ Returns an integer indicating number of amperes to charge the car.
 
 Returns an integer indicating maximum number of amperes supported for charging
 the car.
+
+=head2 charger_phases
+
+Returns an integer 1, 2 or 3 for number of phases of a connected charger.
+Returns undef if no charging is happening.
 
 =head2 charge_limit_soc
 
