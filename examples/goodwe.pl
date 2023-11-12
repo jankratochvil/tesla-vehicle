@@ -19,6 +19,7 @@ use Data::Dumper; $Data::Dumper::Deepcopy=1; $Data::Dumper::Sortkeys=1;
 use DateTime;
 use List::Util qw(min max);
 require Geo::Location::TimeZone;
+require DateTime::Event::Sunrise;
 $|=1;
 
 my $HOME_LAT;
@@ -27,10 +28,14 @@ my $HOME_DISTANCE=10; # measured 7.58
 my $BATTERY_CRITICAL=45;
 my $BATTERY_LOW=50;
 my $BATTERY_HIGH=51;
-my $SAFETY_RATIO_BIGGER=1.5;
+# battery_level=50%
+# charge_limit_soc=51% charge_amps=3A charger_phases=3 charge_port_latch=Engaged charging_state=Complete
+my $BATTERY_HIGH_REQUEST=$BATTERY_HIGH+1;
+my $SAFETY_RATIO_BIGGER=1.3;
 my $SAFETY_RATIO_SMALLER=1.1;
 my $TESLA_TIMEOUT_CHARGING=60;
 my $TESLA_TIMEOUT_NOT_CHARGING=12*60*60;
+my @TESLA_AWAKE_AT=(); # if Tesla gets each day awake at some specific times anyway
 my $WATT_PER_AMP_1=770;
 my $AMP_TOP=16;
 my $WATT_PER_AMP_TOP=733;
@@ -38,7 +43,10 @@ my $TZ;
 my $VOLTS=230; # FIXME
 
 $BATTERY_CRITICAL<$BATTERY_LOW or die;
-$BATTERY_LOW+1==$BATTERY_HIGH or die;
+$BATTERY_LOW<$BATTERY_HIGH or die;
+$BATTERY_HIGH<=$BATTERY_HIGH_REQUEST or die;
+50<=$BATTERY_LOW or die; # =="BATTERY_LOW_REQUEST"
+$BATTERY_HIGH_REQUEST<=100 or die;
 
 my($powerstation,$account,$pwd);
 my $fn=$ENV{"HOME"}."/.goodwe.pl";
@@ -185,16 +193,15 @@ sub cmd($@) {
   return $rhs;
 }
 
-sub print_timestamp(;$) {
-  my($offset)=@_;
-  my $now=DateTime->now(
-    "time_zone"=>"local",
-  );
+sub print_timestamp(;$$) {
+  my($nowparam,$offset)=@_;
+  $nowparam||=DateTime->now();
+  my $now=$nowparam->clone();
+  $now->set_time_zone("local");
   $now->add("seconds"=>$offset) if $offset;
   if ($TZ) {
-    my $nowtz=DateTime->now(
-      "time_zone"=>$TZ,
-    );
+    my $nowtz=$nowparam->clone();
+    $nowtz->set_time_zone($TZ);
     $nowtz->add("seconds"=>$offset) if $offset;
     print $nowtz->iso8601().$nowtz->time_zone_short_name()." " if $now->offset()!=$nowtz->offset();
   }
@@ -276,7 +283,7 @@ sub amps_to_watt($) {
   return 0 if $amps==0;
   die $amps if $amps<1;
   die $amps if $amps!=int($amps);
-  return $amps*($WATT_PER_AMP_1+($WATT_PER_AMP_TOP-$WATT_PER_AMP_1)*($amps-1)/($AMP_TOP-1));
+  return int($amps*($WATT_PER_AMP_1+($WATT_PER_AMP_TOP-$WATT_PER_AMP_1)*($amps-1)/($AMP_TOP-1)));
 }
 sub watt_to_amp($$) {
   my($watt,$amp_top)=@_;
@@ -284,6 +291,10 @@ sub watt_to_amp($$) {
     return $amps if $watt>=amps_to_watt $amps;
   }
   return 0;
+}
+sub print_amps_to_watt($) {
+  my($amp_top)=@_;
+  print join(" ",map "${_}A=".amps_to_watt($_)."W",0..$amp_top)."\n";
 }
 
 sub distance($$) {
@@ -322,43 +333,68 @@ while (1) {
     $charger_phases=$car->charger_phases;
   };
   elapsednl $t0;
+  print "latitude,longitude=$latitude,$longitude";
+  my $old_TZ=$TZ;
+  $TZ=$geo->lookup("lat"=>$HOME_LAT,"lon"=>$HOME_LON);
+  print ";TZ=$TZ";
   my $distance=distance $latitude,$longitude;
   my $at_home=$distance<$HOME_DISTANCE?1:0;
-  print "latitude,longitude=$latitude,$longitude;distance=$distance,max=$HOME_DISTANCE,at_home=$at_home\n";
-  $TZ=$geo->lookup("lat"=>$latitude,"lon"=>$longitude);
-  print "TZ=$TZ\n";
-  print "charge_port_latch=$charge_port_latch\n";
+  print ";distance=$distance,max=$HOME_DISTANCE,at_home=$at_home";
+  my $sunriseloc=DateTime::Event::Sunrise->new(
+    "latitude" =>$HOME_LAT,
+    "longitude"=>$HOME_LON,
+  );
+  my $nowtz=DateTime->now(
+    "time_zone"=>$TZ,
+  );
+  my $sunrise=$sunriseloc->sunrise_datetime($nowtz);
+  my $sunset =$sunriseloc-> sunset_datetime($nowtz);
+  sub day() {
+print "\ndebug-in-day:\n";
+print "sunrise: ";print_timestamp $sunrise;
+print "sunrise is floating\n" if $sunrise->time_zone->is_floating;
+print "sunrise=".Dumper [$sunrise->utc_rd_values];
+print "nowtz:   ";print_timestamp $nowtz;
+print "nowtz is floating\n" if $nowtz->time_zone->is_floating;
+print "nowtz=".Dumper [$nowtz->utc_rd_values];
+print "sunset:  ";print_timestamp $sunset;
+print "sunset is floating\n" if $sunset->time_zone->is_floating;
+print "sunset=".Dumper [$sunset->utc_rd_values];
+print "nowtz>=sunrise=".($nowtz>=$sunrise?1:0)."\n";
+print "nowtz< sunset =".($nowtz< $sunset ?1:0)."\n";
+print "nowtz>=sunrise&&nowtz< sunset=".($nowtz>=$sunrise&&$nowtz<$sunset?1:0)."\n";
+print "is_between                   =".($nowtz->is_between($sunrise,$sunset)?1:0)."\n";
+#    return $nowtz>=$sunrise&&$nowtz<$sunset;
+#    my $retval=$nowtz>=$sunrise&&$nowtz<$sunset;
+    my $retval=$nowtz->is_between($sunrise,$sunset);
+print "retval=".($retval?1:0)."\n";
+print "debug-in-day end:\n";
+    return $retval;
+  }
+  my $day=day();
+  print ";day=".($day?1:0)."\n";
+  print_timestamp() if $TZ ne ($old_TZ||"");
+  print "sunrise: "; print_timestamp($sunrise);
+  print "sunset : "; print_timestamp($sunset );
   print "battery_level=$battery_level%\n";
-  print "charge_limit_soc=$charge_limit_soc%\n";
-  print "charge_amps=${charge_amps}A\n";
+  print "charge_limit_soc=$charge_limit_soc% charge_amps=${charge_amps}A charger_phases=$charger_phases charge_port_latch=$charge_port_latch charging_state=$charging_state\n";
   print "WARNING: charge_current_request=$charge_current_request!=$charge_amps=charge_amps\n" if $charge_current_request!=$charge_amps;
-  print "charger_phases=$charger_phases\n";
-  print "charging_state=$charging_state\n";
   die "Battery $battery_level<$BATTERY_CRITICAL=BATTERY_CRITICAL" if $battery_level<$BATTERY_CRITICAL;
   #die "Battery $battery_level>$BATTERY_HIGH=BATTERY_HIGH" if $battery_level>$BATTERY_HIGH;
-  die "Unexpected charge_limit_soc=$charge_limit_soc!=$BATTERY_HIGH=BATTERY_HIGH&&!=$BATTERY_LOW=BATTERY_LOW"
-    if $charge_limit_soc!=$BATTERY_HIGH&&$charge_limit_soc!=$BATTERY_LOW;
-  my $battery_high=$charge_limit_soc==$BATTERY_HIGH;
+  die "Unexpected BATTERY_LOW=$BATTERY_LOW!<=charge_limit_soc=$charge_limit_soc!<=$BATTERY_HIGH_REQUEST=BATTERY_HIGH_REQUEST"
+    if $charge_limit_soc<$BATTERY_LOW||$charge_limit_soc>$BATTERY_HIGH_REQUEST;
+  my $battery_high=$battery_level>=$BATTERY_HIGH;
   my $charging=$charging_state eq "Charging";
   die "Charging $charging_state not expected" if $charging_state!~/^(?:Charging|Complete)$/; #(?:Stopped|Disconnected)?
   print "WARNING: !charging&&charge_actual_current=$charge_actual_current!=0" if !$charging&&$charge_actual_current;
-  print "WARNING: charge_actual_current=$charge_actual_current!=$charge_amps=charge_amps\n" if $charging&&$charge_actual_current!=$charge_amps;
-  my $amps_old=$charging?$charge_actual_current:0; # FIXME:simplify?
+  # FIXME WARNING: charge_actual_current=0!=5=charge_amps
+  #print "WARNING: charge_actual_current=$charge_actual_current!=$charge_amps=charge_amps\n" if $charging&&$charge_actual_current!=$charge_amps;
+  print "WARNING: charge_actual_current=$charge_actual_current!=0\n" if $charge_actual_current;
+  # $charge_amps->$charge_actual_current? but $charge_actual_current==0
+  my $amps_old=$charging?$charge_amps:0; # FIXME:simplify?
   $charge_port_latch=0 if $charge_port_latch ne "Engaged";
   my $wanted;
   my $sleep;
-  # FIXME: Summer/winter
-  my $day_start_hour=9;
-  my $day_stop_hour =16;
-  sub day() {
-    my $nowtz=DateTime->now(
-      "time_zone"=>$TZ,
-    );
-    my $hour=$nowtz->hour();
-    return $hour>=$day_start_hour&&$hour<$day_stop_hour;
-  }
-  my $day=day();
-  print "day=".($day?1:0)."\n";
   if (!$at_home) {
     $wanted=0;
     $sleep=max(60,$distance/1000/180*3600);
@@ -392,68 +428,109 @@ while (1) {
     }
   }
   print "wanted=$wanted sleep=$sleep\n";
-  if ($wanted) {
-    my $data=data_retried();
-    my $pmeter=$data->{"inverter"}[0]{"invert_full"}{"pmeter"};
-    die Dumper $data."\n!pmeter" if !defined $pmeter;
-    $pmeter=sprintf "%+d",$pmeter;
-    print "pmeter=$pmeter\n";
-    my $amps_old_watt=amps_to_watt $amps_old;
-    my $pmeter_real=$pmeter+$amps_old_watt;
-    my $limit_watt_base=$amps_old*$VOLTS*$charger_phases;
-    my $limit_watt_low =$limit_watt_base*($SAFETY_RATIO_SMALLER-1);
-    my $limit_watt_high=$limit_watt_base*($SAFETY_RATIO_BIGGER -1);
-    print "pmeter=$pmeter amps_old=$amps_old amps_old_watt=$amps_old_watt\n";
-    print "pmeter_real: limit_watt_low=$limit_watt_low(==*$SAFETY_RATIO_SMALLER)?$pmeter_real?$limit_watt_high(==*$SAFETY_RATIO_BIGGER)=limit_watt_high\n";
-    if ($pmeter_real<$limit_watt_low||$pmeter_real>$limit_watt_high) {
-      my $pmeter_real_safe=$pmeter_real/$SAFETY_RATIO_BIGGER;
-      $wanted=watt_to_amp $pmeter_real_safe,$car->charge_current_request_max;
-      print "pmeter_real=$pmeter SAFETY_RATIO_BIGGER=$SAFETY_RATIO_BIGGER pmeter_real_safe=$pmeter_real_safe wanted=$wanted\n";
-    } else {
-      print "limit_watt_low<=pmeter_real<=limit_watt_high\n";
-    }
-  } elsif ($amps_old&&$at_home&&$charge_port_latch) {
-    print "Stopping charging.\n";
-  }
   if ($at_home&&$charge_port_latch) {
-    $sleep=max($sleep,$day?5*60:60*60) if !$amps_old&&!$wanted;
-    my $wanted_soc=$wanted?$BATTERY_HIGH:$BATTERY_LOW;
+    my $pv=0;
+    if ($wanted) {
+      my $data=data_retried();
+      $pv=$data->{"powerflow"}{"pv"};
+      $pv=~s/^(\d+(?:[.]\d+)?)[(]W[)]$/$1/ or die "pv=<$pv>!=\\d(W)";
+      my $load=$data->{"powerflow"}{"load"};
+      $load=~s/^(\d+(?:[.]\d+)?)[(]W[)]$/$1/ or die "load=<$load>!=\\d(W)";
+      my $inverter=$data->{"inverter"}[0] or die Dumper $data."\n!inverter";
+      my $soc=$inverter->{"soc"};
+      $soc=~s/^(\d+)[%]$/$1/ or die "soc=<$soc>!=\\d%";
+      print "pv=${pv}W load=${load}W soc=${soc}%\n";
+      my $bms_status=$inverter->{"bms_status"} or die Dumper $data."\n!bms_status";
+      print "bms_status=$bms_status\n";
+      my $bms_status_re="(?:StandbyOfBattery|ChargingOfBattery|DischargingOfBattery)"; # FIXME: when ""?
+      $bms_status=~/^$bms_status_re$/o or print "WARNING: bms_status=$bms_status!~/$bms_status_re/\n";
+      my $battery_power=$inverter->{"battery_power"};
+      print "battery_power=${battery_power}W";
+      $battery_power=int($battery_power);
+      print " -> ${battery_power}W\n";
+      my $pmeter=$inverter->{"invert_full"}{"pmeter"};
+      die Dumper $data."\n!pmeter" if !defined $pmeter;
+      $pmeter=sprintf "%+d",$pmeter;
+      my $amps_old_watt=amps_to_watt $amps_old;
+      print "amps_old=${amps_old}A amps_old_watt=${amps_old_watt}W\n";
+      my $pmeter_real=$pmeter+$amps_old_watt-$battery_power;
+      print "pmeter_real=${pmeter_real}W pmeter=${pmeter}W battery_power(-=usable=charge,+=problem=discharge)=${battery_power}W\n";
+      print_amps_to_watt $car->charge_current_request_max;
+      my $pmeter_real_safe=int($pmeter_real/$SAFETY_RATIO_BIGGER);
+      $wanted=watt_to_amp $pmeter_real_safe,$car->charge_current_request_max;
+      print(($amps_old==$wanted?"kept  : ":"CHANGE: ")
+	."pmeter_real=${pmeter_real}W SAFETY_RATIO_BIGGER=$SAFETY_RATIO_BIGGER pmeter_real_safe=${pmeter_real_safe}W amps_old=${amps_old}A -> wanted=${wanted}A");
+      if ($amps_old!=$wanted) {
+	print " ";
+	print_timestamp();
+      } else {
+	print "\n";
+      }
+    } elsif ($amps_old) {
+      print "Stopping charging.\n";
+    }
+    $sleep=max($sleep,$day?($pv?60:5*60):60*60) if !$amps_old&&!$wanted;
+    my $wanted_soc=$wanted?$BATTERY_HIGH_REQUEST:$BATTERY_LOW;
     $wanted||=$car->charge_current_request_max;
     if ($wanted_soc!=$charge_limit_soc||$charge_amps!=$wanted) {
       $tesla_timestamp=undef;
       my $t0=time();
       retry sub {
 	$car->api_cache_clear;
-	$charge_limit_soc==$wanted_soc or cmd "charge_limit_set",$wanted or die;
-	$charge_limit_soc=$wanted_soc;
-	$charge_amps==$wanted or cmd "charge_amps_set",$wanted or die;
-	$charge_amps=$wanted;
+#print "debug0\n";
+	# some Perl bug: It does not work without the references.
+	sub change_limit_soc($$) {
+	  my($charge_limit_socref,$wanted_socref)=@_;
+#print "debug change_limit_soc charge_limit_soc=$$charge_limit_socref wanted_soc=$$wanted_socref\n";
+	  $$charge_limit_socref==$$wanted_socref or cmd "charge_limit_set",$$wanted_socref or die;
+	  $$charge_limit_socref=$$wanted_socref;
+	}
+	sub change_amps($$) {
+	  my($charge_ampsref,$wantedref)=@_;
+#print "debug change_amps charge_amps=$$charge_ampsref wanted=$$wantedref\n";
+	  $$charge_ampsref==$$wantedref or cmd "charge_amps_set",$$wantedref or die;
+	  $$charge_ampsref=$$wantedref;
+	}
+	if ($wanted>$charge_amps) {
+#print "debug wanted>charge_amps\n";
+	  change_limit_soc(\$charge_limit_soc,\$wanted_soc);
+	  change_amps(\$charge_amps,\$wanted);
+	} else {
+#print "debug wanted<=charge_amps\n";
+	  change_amps(\$charge_amps,\$wanted);
+	  change_limit_soc(\$charge_limit_soc,\$wanted_soc);
+	}
+#print "debug end\n";
       };
       print "cmd";
       elapsednl $t0;
       $sleep=60;
     }
   }
-  print_timestamp;
   print "sleep=$sleep\n";
-  if (!day()) {
-    my $nowtz=DateTime->now(
-      "time_zone"=>$TZ,
-    );
-    my $hour=$nowtz->hour();
-    $hour=$day_start_hour+($hour<$day_start_hour?0:24);
-    my $sleep_to_day=($hour-$nowtz->hour())*3600+(0-$nowtz->minute())*60+(5-$nowtz->second())*1;
-    if ($sleep_to_day<60) {
-      print "sleep_to_day=$sleep_to_day ignored as it is too short.\n";
-    } elsif ($sleep_to_day<$sleep) {
-      $sleep=$sleep_to_day;
-      print "sleep=sleep_to_day=$sleep as a day will happen earlier.\n";
-    } else {
-      print "sleep_to_day=$sleep_to_day but sleep is shorter.\n";
+  sub seconds_since_midnight($) {
+    my($now)=@_;
+    return $now->hour()*3600+$now->minute()*60+$now->second();
+  }
+  my @awakes;
+  push @awakes,seconds_since_midnight($sunrise);
+  push @awakes,@TESLA_AWAKE_AT;
+  { my $seconds_since_midnight=seconds_since_midnight($nowtz);
+    for my $awake (@awakes) {
+      $awake+=24*60*60 if $awake<$seconds_since_midnight;
+      my $sleep_new=$awake-$seconds_since_midnight;
+      $sleep_new>=0 or die;
+      if ($sleep_new<$sleep) {
+	$sleep=$sleep_new;
+	print "sleep=sleep_new=$sleep as a wakeup is earlier.\n";
+	$tesla_timestamp=undef;
+      } else {
+	print "sleep_new=$sleep_new but sleep is already earlier.\n";
+      }
     }
   }
   print "Going to awake at: ";
-  print_timestamp $sleep;
+  print_timestamp($nowtz,$sleep);
   my $slept=sleep $sleep;
   warn "slept=$slept!=$sleep=sleep" if $slept!=$sleep;
   my $age=int(time()-$tesla_timestamp) if $tesla_timestamp;
