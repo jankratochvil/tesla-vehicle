@@ -61,6 +61,16 @@ sub elapsednl($) {
   printf " %.2fs\n",time()-$t0;
 }
 
+sub check($$;$$) {
+  my($res,$msg,@msg2)=@_;
+  die $res->as_string() if !$res->is_success();
+  my $json=JSON::decode_json($res->content());
+  die "res hasError" if $json->{"hasError"};
+  do { return undef if $_&&$json->{"msg"} eq $_; } for @msg2;
+  die "res msg '".$json->{"msg"}."'!='$msg'" if $json->{"msg"} ne $msg;
+  return $json;
+}
+
 my($jar,$ua,%token,$api);
 sub relogin() {
   $jar=HTTP::CookieJar::LWP->new();
@@ -75,19 +85,10 @@ sub relogin() {
     "client"=>"ios",
     "language"=>"en",
   );
-  sub retoken() {
+  my sub retoken() {
     $ua->default_header("Token"=>JSON::encode_json(\%token));
   }
   retoken();
-  sub check($$;$$) {
-    my($res,$msg,@msg2)=@_;
-    die $res->as_string() if !$res->is_success();
-    my $json=JSON::decode_json($res->content());
-    die "res hasError" if $json->{"hasError"};
-    do { return undef if $_&&$json->{"msg"} eq $_; } for @msg2;
-    die "res msg '".$json->{"msg"}."'!='$msg'" if $json->{"msg"} ne $msg;
-    return $json;
-  }
 
   my $res1json=check($ua->post(
     "https://semsportal.com/api/v2/PowerStation/GetMonitorDetailByPowerstationId",
@@ -144,15 +145,17 @@ sub data() {
   die "login failed";
 }
 
-sub retry($) {
-  my($func)=@_;
-  for my $attempt (0..1000000) {
-    print "retry attempt $attempt...\n" if $attempt;
+sub retry($;$) {
+  my($func,$retries)=@_;
+  $retries//=1000000;
+  for my $attempt (0..$retries) {
+    print "retry attempt $attempt of $retries...\n" if $attempt;
     $@=undef;
     my $retval=eval { &{$func}(); };
     return $retval if !$@;
     warn "failure: $@\n";
   }
+  return undef;
 }
 
 sub data_retried() {
@@ -217,7 +220,7 @@ if (@ARGV>=1&&$ARGV[0] eq "--calibrate") {
     my $charging_state=$car->charging_state;
     print "charging_state=$charging_state\n";
     $car->charging_state eq "Complete" or die "!Complete";
-    sub load_get() {
+    my sub load_get() {
       my $data=data_retried();
       my $load=$data->{"powerflow"}{"load"};
       $load=~s/^(\d+(?:[.]\d+)?)[(]W[)]$/$1/ or die "load=<$load>!=\\d(W)";
@@ -239,7 +242,7 @@ if (@ARGV>=1&&$ARGV[0] eq "--calibrate") {
     my $charge_limit_soc=$car->charge_limit_soc;
     print "charge_limit_soc=$charge_limit_soc\n";
     $charge_limit_soc==$soc or cmd "charge_limit_set",$soc or die;
-    sub load_wait($$) {
+    my sub load_wait($$) {
       my($sub,$expect)=@_;
       my $waited=0;
       while (1) {
@@ -349,27 +352,8 @@ while (1) {
   );
   my $sunrise=$sunriseloc->sunrise_datetime($nowtz);
   my $sunset =$sunriseloc-> sunset_datetime($nowtz);
-  sub day() {
-print "\ndebug-in-day:\n";
-print "sunrise: ";print_timestamp $sunrise;
-print "sunrise is floating\n" if $sunrise->time_zone->is_floating;
-print "sunrise=".Dumper [$sunrise->utc_rd_values];
-print "nowtz:   ";print_timestamp $nowtz;
-print "nowtz is floating\n" if $nowtz->time_zone->is_floating;
-print "nowtz=".Dumper [$nowtz->utc_rd_values];
-print "sunset:  ";print_timestamp $sunset;
-print "sunset is floating\n" if $sunset->time_zone->is_floating;
-print "sunset=".Dumper [$sunset->utc_rd_values];
-print "nowtz>=sunrise=".($nowtz>=$sunrise?1:0)."\n";
-print "nowtz< sunset =".($nowtz< $sunset ?1:0)."\n";
-print "nowtz>=sunrise&&nowtz< sunset=".($nowtz>=$sunrise&&$nowtz<$sunset?1:0)."\n";
-print "is_between                   =".($nowtz->is_between($sunrise,$sunset)?1:0)."\n";
-#    return $nowtz>=$sunrise&&$nowtz<$sunset;
-#    my $retval=$nowtz>=$sunrise&&$nowtz<$sunset;
-    my $retval=$nowtz->is_between($sunrise,$sunset);
-print "retval=".($retval?1:0)."\n";
-print "debug-in-day end:\n";
-    return $retval;
+  my sub day() {
+    return $nowtz->is_between($sunrise,$sunset);
   }
   my $day=day();
   print ";day=".($day?1:0)."\n";
@@ -401,7 +385,7 @@ print "debug-in-day end:\n";
     print "Not at home.\n";
   } elsif (!$charge_port_latch) {
     $wanted=0;
-    $sleep=15;
+    $sleep=60;
     print "At home but not plugged.\n";
   } elsif ($battery_level>=$BATTERY_HIGH&&!$charging) {
     $wanted=0;
@@ -415,7 +399,7 @@ print "debug-in-day end:\n";
       } else {
 	$wanted=1;
       }
-      $sleep=15;
+      $sleep=60;
     # !$charging&&$battery_level<$BATTERY_HIGH
     } elsif ($battery_high) {
       $wanted=0;
@@ -439,7 +423,10 @@ print "debug-in-day end:\n";
       my $inverter=$data->{"inverter"}[0] or die Dumper $data."\n!inverter";
       my $soc=$inverter->{"soc"};
       $soc=~s/^(\d+)[%]$/$1/ or die "soc=<$soc>!=\\d%";
-      print "pv=${pv}W load=${load}W soc=${soc}%\n";
+      my $amps_old_watt=amps_to_watt $amps_old;
+      my $amps_old_watt_valid=$amps_old_watt<=$load?1:0;
+      print "pv=${pv}W load=${load}W amps_old=${amps_old}A=${amps_old_watt}W amps_old_watt_valid=$amps_old_watt_valid soc=${soc}%\n";
+      $amps_old_watt=0 if !$amps_old_watt_valid;
       my $bms_status=$inverter->{"bms_status"} or die Dumper $data."\n!bms_status";
       print "bms_status=$bms_status\n";
       my $bms_status_re="(?:StandbyOfBattery|ChargingOfBattery|DischargingOfBattery)"; # FIXME: when ""?
@@ -451,15 +438,22 @@ print "debug-in-day end:\n";
       my $pmeter=$inverter->{"invert_full"}{"pmeter"};
       die Dumper $data."\n!pmeter" if !defined $pmeter;
       $pmeter=sprintf "%+d",$pmeter;
-      my $amps_old_watt=amps_to_watt $amps_old;
-      print "amps_old=${amps_old}A amps_old_watt=${amps_old_watt}W\n";
       my $pmeter_real=$pmeter+$amps_old_watt-$battery_power;
       print "pmeter_real=${pmeter_real}W pmeter=${pmeter}W battery_power(-=usable=charge,+=problem=discharge)=${battery_power}W\n";
       print_amps_to_watt $car->charge_current_request_max;
-      my $pmeter_real_safe=int($pmeter_real/$SAFETY_RATIO_BIGGER);
-      $wanted=watt_to_amp $pmeter_real_safe,$car->charge_current_request_max;
-      print(($amps_old==$wanted?"kept  : ":"CHANGE: ")
-	."pmeter_real=${pmeter_real}W SAFETY_RATIO_BIGGER=$SAFETY_RATIO_BIGGER pmeter_real_safe=${pmeter_real_safe}W amps_old=${amps_old}A -> wanted=${wanted}A");
+      my $pmeter_real_low =int($pmeter_real/$SAFETY_RATIO_BIGGER );
+      my $pmeter_real_high=int($pmeter_real/$SAFETY_RATIO_SMALLER);
+      my $wanted_low =watt_to_amp $pmeter_real_low ,$car->charge_current_request_max;
+      my $wanted_high=watt_to_amp $pmeter_real_high,$car->charge_current_request_max;
+      $wanted=$amps_old<$wanted_low||$amps_old>$wanted_high?$wanted_low:$amps_old;
+      my $wanted_watt=amps_to_watt $wanted;
+      print $amps_old==$wanted?"kept  ":"CHANGE";
+      print ": pmeter_real=${pmeter_real}W /$SAFETY_RATIO_BIGGER=${pmeter_real_low}W->${wanted_low}A ";
+      print(($amps_old<$wanted_low ?"!":"")."<=");
+      print " old=${amps_old_watt}W=${amps_old}A ";
+      print(($amps_old>$wanted_high?"!":"")."<=");
+      print " /$SAFETY_RATIO_SMALLER=${pmeter_real_high}W->${wanted_high}A";
+      print " -> wanted=${wanted_watt}W=${wanted}A";
       if ($amps_old!=$wanted) {
 	print " ";
 	print_timestamp();
@@ -472,43 +466,49 @@ print "debug-in-day end:\n";
     $sleep=max($sleep,$day?($pv?60:5*60):60*60) if !$amps_old&&!$wanted;
     my $wanted_soc=$wanted?$BATTERY_HIGH_REQUEST:$BATTERY_LOW;
     $wanted||=$car->charge_current_request_max;
-    if ($wanted_soc!=$charge_limit_soc||$charge_amps!=$wanted) {
+    if ($wanted_soc!=$charge_limit_soc||$wanted!=$charge_amps) {
       $tesla_timestamp=undef;
       my $t0=time();
       retry sub {
 	$car->api_cache_clear;
-#print "debug0\n";
 	# some Perl bug: It does not work without the references.
-	sub change_limit_soc($$) {
-	  my($charge_limit_socref,$wanted_socref)=@_;
-#print "debug change_limit_soc charge_limit_soc=$$charge_limit_socref wanted_soc=$$wanted_socref\n";
-	  $$charge_limit_socref==$$wanted_socref or cmd "charge_limit_set",$$wanted_socref or die;
-	  $$charge_limit_socref=$$wanted_socref;
+	my sub change_limit_soc($$) {
+	  my($charge_limit_soc,$wanted_soc)=@_;
+	  $charge_limit_soc==$wanted_soc or cmd "charge_limit_set",$wanted_soc or die;
+	  $charge_limit_soc=$wanted_soc;
 	}
-	sub change_amps($$) {
-	  my($charge_ampsref,$wantedref)=@_;
-#print "debug change_amps charge_amps=$$charge_ampsref wanted=$$wantedref\n";
-	  $$charge_ampsref==$$wantedref or cmd "charge_amps_set",$$wantedref or die;
-	  $$charge_ampsref=$$wantedref;
+	my sub change_amps($$) {
+	  my($charge_amps,$wanted)=@_;
+	  $charge_amps==$wanted or cmd "charge_amps_set",$wanted or die;
+	  $charge_amps=$wanted;
 	}
 	if ($wanted>$charge_amps) {
-#print "debug wanted>charge_amps\n";
-	  change_limit_soc(\$charge_limit_soc,\$wanted_soc);
-	  change_amps(\$charge_amps,\$wanted);
+	  change_limit_soc($charge_limit_soc,$wanted_soc);
+	  change_amps($charge_amps,$wanted);
 	} else {
-#print "debug wanted<=charge_amps\n";
-	  change_amps(\$charge_amps,\$wanted);
-	  change_limit_soc(\$charge_limit_soc,\$wanted_soc);
+	  change_amps($charge_amps,$wanted);
+	  change_limit_soc($charge_limit_soc,$wanted_soc);
 	}
-#print "debug end\n";
-      };
+	$car->api_cache_clear;
+	print "charge_limit_soc=";
+	$charge_limit_soc=$car->charge_limit_soc;
+	print "$charge_limit_soc\n";
+	print "charge_amps=";
+	$charge_amps=$car->charge_amps;
+	print "$charge_amps\n";
+	my @err;
+	push @err,"wanted_soc=$wanted_soc!=$charge_limit_soc=charge_limit_soc" if $wanted_soc!=$charge_limit_soc;
+	push @err,"wanted=$wanted!=$charge_amps=charge_amps" if $wanted!=$charge_amps;
+	die "tesla settings failed, retrying: ".join(" && ",@err)."\n" if @err;
+	return 1;
+      },3 or do { cmd "charge_limit_set",$BATTERY_LOW or warn "shutdown battery"; die "failed change"; };
       print "cmd";
       elapsednl $t0;
       $sleep=60;
     }
   }
   print "sleep=$sleep\n";
-  sub seconds_since_midnight($) {
+  my sub seconds_since_midnight($) {
     my($now)=@_;
     return $now->hour()*3600+$now->minute()*60+$now->second();
   }
