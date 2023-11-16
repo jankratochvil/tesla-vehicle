@@ -27,10 +27,11 @@ my $HOME_LON;
 my $HOME_DISTANCE=10; # measured 7.58
 my $BATTERY_CRITICAL=45;
 my $BATTERY_LOW=50;
-my $BATTERY_HIGH=51;
+my $BATTERY_HIGH_fn=$ENV{"HOME"}."/.goodwe.high.pl";
+my $BATTERY_HIGH;
 # battery_level=50%
 # charge_limit_soc=51% charge_amps=3A charger_phases=3 charge_port_latch=Engaged charging_state=Complete
-my $BATTERY_HIGH_REQUEST=$BATTERY_HIGH+1;
+my $BATTERY_HIGH_REQUEST;
 my $SAFETY_RATIO_BIGGER=1.3;
 my $SAFETY_RATIO_SMALLER=1.1;
 my $TESLA_TIMEOUT_CHARGING=60;
@@ -43,10 +44,9 @@ my $TZ;
 my $VOLTS=230; # FIXME
 
 $BATTERY_CRITICAL<$BATTERY_LOW or die;
-$BATTERY_LOW<$BATTERY_HIGH or die;
-$BATTERY_HIGH<=$BATTERY_HIGH_REQUEST or die;
 50<=$BATTERY_LOW or die; # =="BATTERY_LOW_REQUEST"
-$BATTERY_HIGH_REQUEST<=100 or die;
+sub BATTERY_HIGH_refresh();
+BATTERY_HIGH_refresh();
 
 my($powerstation,$account,$pwd);
 my $fn=$ENV{"HOME"}."/.goodwe.pl";
@@ -304,11 +304,32 @@ sub distance($$) {
   return sprintf "%f",sqrt(($lat-$HOME_LAT)**2+($lon-$HOME_LON)**2)*111139;
 }
 
+sub readnumber($) {
+  my($fn)=@_;
+  local *F;
+  open F,$fn or die "open $fn: $!";
+  my $retval=do { local $/; <F>; };
+  $retval or die "read $fn: $retval: $!";
+  close F or die "close $fn: $!";
+  # This can match a trailing \n.
+  $retval=~s/^(\d+)$/$1/ or die "parse $fn: $retval";
+  return $retval;
+}
+
+sub BATTERY_HIGH_refresh() {
+  $BATTERY_HIGH=readnumber $BATTERY_HIGH_fn;
+  $BATTERY_HIGH_REQUEST=min(100,$BATTERY_HIGH+1);
+  $BATTERY_LOW<$BATTERY_HIGH or die "! BATTERY_LOW=$BATTERY_LOW<$BATTERY_HIGH=BATTERY_HIGH";
+  $BATTERY_HIGH<=$BATTERY_HIGH_REQUEST or die "! BATTERY_HIGH=$BATTERY_HIGH<=$BATTERY_HIGH_REQUEST=BATTERY_HIGH_REQUEST"
+  $BATTERY_HIGH_REQUEST<=100 or die;
+}
+
 my $tesla_timestamp;
 my $geo=Geo::Location::TimeZone->new();
 while (1) {
   print_timestamp();
   $tesla_timestamp||=time();
+  BATTERY_HIGH_refresh();
   my($battery_level,$charge_limit_soc,$charging_state,$charge_amps,$charge_current_request,$charge_actual_current,$latitude,$longitude,$charge_port_latch,$charger_phases);
   print "tesla fetch";
   my $t0=time();
@@ -385,7 +406,7 @@ while (1) {
     $wanted=0;
     $sleep=60;
     print "At home but not plugged.\n";
-  } elsif ($battery_level>=$BATTERY_HIGH&&!$charging) {
+  } elsif ($battery_high&&!$charging) {
     $wanted=0;
     $sleep=$TESLA_TIMEOUT_NOT_CHARGING;
     print "kept no charging as battery_level=$battery_level>=$BATTERY_HIGH=BATTERY_HIGH\n";
