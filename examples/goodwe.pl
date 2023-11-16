@@ -196,16 +196,14 @@ sub cmd($@) {
   return $rhs;
 }
 
-sub print_timestamp(;$$) {
-  my($nowparam,$offset)=@_;
+sub print_timestamp(;$) {
+  my($nowparam)=@_;
   $nowparam||=DateTime->now();
   my $now=$nowparam->clone();
   $now->set_time_zone("local");
-  $now->add("seconds"=>$offset) if $offset;
   if ($TZ) {
     my $nowtz=$nowparam->clone();
     $nowtz->set_time_zone($TZ);
-    $nowtz->add("seconds"=>$offset) if $offset;
     print $nowtz->iso8601().$nowtz->time_zone_short_name()." " if $now->offset()!=$nowtz->offset();
   }
   print $now->iso8601().$now->time_zone_short_name()."\n";
@@ -517,6 +515,7 @@ while (1) {
   push @awakes,@TESLA_AWAKE_AT;
   { my $seconds_since_midnight=seconds_since_midnight($nowtz);
     for my $awake (@awakes) {
+      printf "@"."%02d:%02d:%02d ",int($awake/3600),int(($awake%3600)/60),int($awake%60);
       $awake+=24*60*60 if $awake<$seconds_since_midnight;
       my $sleep_new=$awake-$seconds_since_midnight;
       $sleep_new>=0 or die;
@@ -530,9 +529,11 @@ while (1) {
     }
   }
   print "Going to awake at: ";
-  print_timestamp($nowtz,$sleep);
-  my $slept=sleep $sleep;
-  warn "slept=$slept!=$sleep=sleep" if $slept!=$sleep;
+  my $awake_at=DateTime->now();
+  $awake_at->add("seconds"=>$sleep);
+  print_timestamp $awake_at;
+  # Machine suspend resistant.
+  sleep 1 while DateTime->now()<$awake_at;
   my $age=int(time()-$tesla_timestamp) if $tesla_timestamp;
   # FIXME: Parked after driving.
   my $limit=($charging?$TESLA_TIMEOUT_CHARGING:$TESLA_TIMEOUT_NOT_CHARGING)-10;
