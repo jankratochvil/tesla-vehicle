@@ -418,6 +418,34 @@ sub charge_amps_set {
     return $return->{result};
 }
 
+sub charge_on {
+    my ($self) = @_;
+    $self->_online_check;
+    my $return = $self->api(endpoint => 'START_CHARGE', id => $self->id);
+
+    $self->api_cache_clear;
+
+    if (! $return->{result} && $self->warn) {
+        print "Couldn't turn charge on: '$return->{reason}'\n";
+    }
+
+    return $return->{result};
+}
+sub charge_off {
+    my ($self) = @_;
+    $self->_online_check;
+
+    my $return = $self->api(endpoint => 'STOP_CHARGE', id => $self->id);
+
+    $self->api_cache_clear;
+
+    if (! $return->{result} && $self->warn) {
+        print "Couldn't turn charge off: '$return->{reason}'\n";
+    }
+
+    return $return->{result};
+}
+
 sub bioweapon_mode_toggle {
     my ($self) = @_;
     $self->_online_check;
@@ -1086,6 +1114,22 @@ Sets the limit in percent the battery can be charged to.
 Returns true if the operation was successful, and false if not.
 
 Follow up with a call to C<battery_level()>.
+
+=head2 charge_on
+
+Turns the battery charging on up to the last value of charge_limit_set.
+
+Returns true on success.
+
+Follow up with a call to C<charging_state()> to verify.
+
+=head2 charge_off
+
+Turns the battery charging off.
+
+Returns true on success.
+
+Follow up with a call to C<charging_state()> to verify.
 
 =head2 trunk_rear_actuate
 

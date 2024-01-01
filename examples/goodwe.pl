@@ -29,9 +29,12 @@ my $BATTERY_CRITICAL=45;
 my $BATTERY_LOW=50;
 my $BATTERY_HIGH_fn=$ENV{"HOME"}."/.goodwe.high.pl";
 my $BATTERY_HIGH;
+my $BATTERY_TOP_fn=$ENV{"HOME"}."/.goodwe.top.pl";
+my $BATTERY_TOP;
 # battery_level=50%
 # charge_limit_soc=51% charge_amps=3A charger_phases=3 charge_port_latch=Engaged charging_state=Complete
 my $BATTERY_HIGH_REQUEST;
+my $BATTERY_TOP_REQUEST;
 my $SAFETY_RATIO_BIGGER=1.3;
 my $SAFETY_RATIO_SMALLER=1.1;
 my $TESLA_TIMEOUT_CHARGING=60;
@@ -45,8 +48,8 @@ my $VOLTS=230; # FIXME
 
 $BATTERY_CRITICAL<$BATTERY_LOW or die;
 50<=$BATTERY_LOW or die; # =="BATTERY_LOW_REQUEST"
-sub BATTERY_HIGH_refresh();
-BATTERY_HIGH_refresh();
+sub BATTERY_refresh();
+BATTERY_refresh();
 
 my($powerstation,$account,$pwd);
 my $fn=$ENV{"HOME"}."/.goodwe.pl";
@@ -313,23 +316,30 @@ sub readnumber($) {
   close F or die "close $fn: $!";
   # This can match a trailing \n.
   $retval=~s/^(\d+)$/$1/ or die "parse $fn: $retval";
+  chomp $retval;
   return $retval;
 }
 
-sub BATTERY_HIGH_refresh() {
+sub BATTERY_refresh() {
   $BATTERY_HIGH=readnumber $BATTERY_HIGH_fn;
+  $BATTERY_TOP =readnumber $BATTERY_TOP_fn;
   $BATTERY_HIGH_REQUEST=min(100,$BATTERY_HIGH+1);
+  $BATTERY_TOP_REQUEST =min(100,$BATTERY_TOP +1);
   $BATTERY_LOW<$BATTERY_HIGH or die "! BATTERY_LOW=$BATTERY_LOW<$BATTERY_HIGH=BATTERY_HIGH";
-  $BATTERY_HIGH<=$BATTERY_HIGH_REQUEST or die "! BATTERY_HIGH=$BATTERY_HIGH<=$BATTERY_HIGH_REQUEST=BATTERY_HIGH_REQUEST"
+  $BATTERY_HIGH<=$BATTERY_HIGH_REQUEST or die "! BATTERY_HIGH=$BATTERY_HIGH<=$BATTERY_HIGH_REQUEST=BATTERY_HIGH_REQUEST";
   $BATTERY_HIGH_REQUEST<=100 or die;
+  $BATTERY_TOP <=$BATTERY_TOP_REQUEST  or die "! BATTERY_TOP=$BATTERY_TOP<=$BATTERY_TOP_REQUEST=BATTERY_TOP_REQUEST";
+  $BATTERY_TOP_REQUEST <=100 or die;
+  $BATTERY_HIGH<=$BATTERY_TOP or die "! BATTERY_HIGH=$BATTERY_HIGH<=$BATTERY_TOP=BATTERY_TOP";
 }
 
 my $tesla_timestamp;
 my $geo=Geo::Location::TimeZone->new();
+my $amps_old_watt_valid_last=time();
 while (1) {
   print_timestamp();
   $tesla_timestamp||=time();
-  BATTERY_HIGH_refresh();
+  BATTERY_refresh();
   my($battery_level,$charge_limit_soc,$charging_state,$charge_amps,$charge_current_request,$charge_actual_current,$latitude,$longitude,$charge_port_latch,$charger_phases);
   print "tesla fetch";
   my $t0=time();
@@ -360,6 +370,9 @@ while (1) {
   $TZ=$geo->lookup("lat"=>$HOME_LAT,"lon"=>$HOME_LON);
   print ";TZ=$TZ";
   my $distance=distance $latitude,$longitude;
+  my sub distance_time() {
+    return max(60,$distance/1000/180*3600);
+  }
   my $at_home=$distance<$HOME_DISTANCE?1:0;
   print ";distance=$distance,max=$HOME_DISTANCE,at_home=$at_home";
   my $sunriseloc=DateTime::Event::Sunrise->new(
@@ -384,11 +397,11 @@ while (1) {
   print "WARNING: charge_current_request=$charge_current_request!=$charge_amps=charge_amps\n" if $charge_current_request!=$charge_amps;
   die "Battery $battery_level<$BATTERY_CRITICAL=BATTERY_CRITICAL" if $battery_level<$BATTERY_CRITICAL;
   #die "Battery $battery_level>$BATTERY_HIGH=BATTERY_HIGH" if $battery_level>$BATTERY_HIGH;
-  die "Unexpected BATTERY_LOW=$BATTERY_LOW!<=charge_limit_soc=$charge_limit_soc!<=$BATTERY_HIGH_REQUEST=BATTERY_HIGH_REQUEST"
-    if $charge_limit_soc<$BATTERY_LOW||$charge_limit_soc>$BATTERY_HIGH_REQUEST;
-  my $battery_high=$battery_level>=$BATTERY_HIGH;
+  my $battery_top =$battery_level>=$BATTERY_TOP ;
+  my $battery_high=$battery_level>=$BATTERY_HIGH&&!$battery_top;
+  die if $battery_high&&$battery_top;
   my $charging=$charging_state eq "Charging";
-  die "Charging $charging_state not expected" if $charging_state!~/^(?:Charging|Complete)$/; #(?:Stopped|Disconnected)?
+  die "Charging $charging_state not expected" if $charging_state!~/^(?:Charging|Complete|Stopped|Disconnected)$/;
   print "WARNING: !charging&&charge_actual_current=$charge_actual_current!=0" if !$charging&&$charge_actual_current;
   # FIXME WARNING: charge_actual_current=0!=5=charge_amps
   #print "WARNING: charge_actual_current=$charge_actual_current!=$charge_amps=charge_amps\n" if $charging&&$charge_actual_current!=$charge_amps;
@@ -398,35 +411,62 @@ while (1) {
   $charge_port_latch=0 if $charge_port_latch ne "Engaged";
   my $wanted;
   my $sleep;
-  if (!$at_home) {
+  if ($charging_state eq "Stopped") {
+    print "CHANGE: Resuming stopped charging!\n";
+    cmd "charge_limit_set",$BATTERY_LOW or warn;
+    cmd "charge_on" or die;
+    $car->api_cache_clear;
+    $tesla_timestamp=undef;
+    next;
+  }
+  if ($charging eq "Disconnected") {
     $wanted=0;
-    $sleep=max(60,$distance/1000/180*3600);
+    $sleep=distance_time();
+    $at_home=0;
+    print "Disconnected charger.\n";
+  } elsif (!$at_home) {
+    $wanted=0;
+    $sleep=distance_time();
     print "Not at home.\n";
   } elsif (!$charge_port_latch) {
     $wanted=0;
     $sleep=60;
     print "At home but not plugged.\n";
-  } elsif ($battery_high&&!$charging) {
+  } elsif ($charge_limit_soc!=$BATTERY_LOW
+         &&$charge_limit_soc!=$BATTERY_HIGH_REQUEST
+	 &&$charge_limit_soc!=$BATTERY_TOP_REQUEST) {
+    $wanted=0;
+    $sleep=60;
+    print "WARNING: Overriden charge_limit_soc=$charge_limit_soc"
+      ." !=$BATTERY_LOW=BATTERY_LOW"
+      ." !=$BATTERY_HIGH_REQUEST=BATTERY_HIGH_REQUEST"
+      ." !=$BATTERY_TOP_REQUEST=BATTERY_TOP_REQUEST"
+      ."\n";
+  } elsif ($battery_top&&!$charging) {
     $wanted=0;
     $sleep=$TESLA_TIMEOUT_NOT_CHARGING;
-    print "kept no charging as battery_level=$battery_level>=$BATTERY_HIGH=BATTERY_HIGH\n";
+    print "kept no charging as battery_level=$battery_level>=$BATTERY_TOP=BATTERY_TOP\n";
   } else {
     if ($charging) {
-      if ($battery_high) {
+      if ($battery_top) {
 	$wanted=0;
-	print "Still charging despite it already has the battery level, stopping charging.\n";
+	print "Still charging despite it already has $BATTERY_TOP%=BATTERY_TOP, stopping charging.\n";
       } else {
 	$wanted=1;
       }
       $sleep=60;
     # !$charging&&$battery_level<$BATTERY_HIGH
-    } elsif ($battery_high) {
+    } elsif ($battery_top) {
       $wanted=0;
       $sleep=60;
-      print "Battery is high.\n";
+      print "Battery is battery_level=$battery_level>=$BATTERY_TOP=BATTERY_TOP.\n";
+    } elsif ($battery_high) {
+      $wanted=1;
+      $sleep=60;
+      print "Battery is battery_level=$battery_level>=$BATTERY_HIGH=BATTERY_HIGH.\n";
     } else { # $battery_low
       $wanted=1;
-      print "Battery is low.\n";
+      print "Battery is battery_level=$battery_level<$BATTERY_HIGH=BATTERY_HIGH -> BATTERY_LOW.\n";
       $sleep=60;
     }
   }
@@ -444,8 +484,11 @@ while (1) {
       $soc=~s/^(\d+)[%]$/$1/ or die "soc=<$soc>!=\\d%";
       my $amps_old_watt=amps_to_watt $amps_old;
       my $amps_old_watt_valid=$amps_old_watt<=$load?1:0;
-      print "pv=${pv}W load=${load}W amps_old=${amps_old}A=${amps_old_watt}W amps_old_watt_valid=$amps_old_watt_valid soc=${soc}%\n";
-      $amps_old_watt=0 if !$amps_old_watt_valid;
+      $amps_old_watt_valid_last=time() if $amps_old_watt_valid;
+      print "pv=${pv}W load=${load}W amps_old=${amps_old}A=${amps_old_watt}W";
+      print " amps_old_watt_valid=$amps_old_watt_valid";
+      print " (for ".int(time()-$amps_old_watt_valid_last)." seconds)" if !$amps_old_watt_valid;
+      print " soc=${soc}%\n";
       my $bms_status=$inverter->{"bms_status"} or die Dumper $data."\n!bms_status";
       print "bms_status=$bms_status\n";
       my $bms_status_re="(?:StandbyOfBattery|ChargingOfBattery|DischargingOfBattery)"; # FIXME: when ""?
@@ -457,8 +500,12 @@ while (1) {
       my $pmeter=$inverter->{"invert_full"}{"pmeter"};
       die Dumper $data."\n!pmeter" if !defined $pmeter;
       $pmeter=sprintf "%+d",$pmeter;
-      my $pmeter_real=$pmeter+$amps_old_watt-$battery_power;
-      print "pmeter_real=${pmeter_real}W pmeter=${pmeter}W battery_power(-=usable=charge,+=problem=discharge)=${battery_power}W\n";
+      my $pmeter_real=$pmeter;
+      $pmeter_real+=$amps_old_watt if $amps_old_watt_valid;;
+      die if $battery_top;
+      my $battery_power_used=$battery_power<0&&!$battery_high?1:0;
+      $pmeter_real-=$battery_power if $battery_power_used;
+      print "pmeter_real=${pmeter_real}W pmeter=${pmeter}W battery_power(-=usable=charge,+=problem=discharge)=${battery_power}W;used=$battery_power_used\n";
       print_amps_to_watt $car->charge_current_request_max;
       my $pmeter_real_low =int($pmeter_real/$SAFETY_RATIO_BIGGER );
       my $pmeter_real_high=int($pmeter_real/$SAFETY_RATIO_SMALLER);
@@ -468,9 +515,9 @@ while (1) {
       my $wanted_watt=amps_to_watt $wanted;
       print $amps_old==$wanted?"kept  ":"CHANGE";
       print ": pmeter_real=${pmeter_real}W /$SAFETY_RATIO_BIGGER=${pmeter_real_low}W->${wanted_low}A ";
-      print(($amps_old<$wanted_low ?"!":"")."<=");
+      print(($amps_old<$wanted_low ?"!":"")."<=(A)");
       print " old=${amps_old_watt}W=${amps_old}A ";
-      print(($amps_old>$wanted_high?"!":"")."<=");
+      print(($amps_old>$wanted_high?"!":"")."<=(A)");
       print " /$SAFETY_RATIO_SMALLER=${pmeter_real_high}W->${wanted_high}A";
       print " -> wanted=${wanted_watt}W=${wanted}A";
       if ($amps_old!=$wanted) {
@@ -493,13 +540,25 @@ while (1) {
 	# some Perl bug: It does not work without the references.
 	my sub change_limit_soc($$) {
 	  my($charge_limit_soc,$wanted_soc)=@_;
-	  $charge_limit_soc==$wanted_soc or cmd "charge_limit_set",$wanted_soc or die;
-	  $charge_limit_soc=$wanted_soc;
+	  return if $charge_limit_soc==$wanted_soc;
+	  # warn only, sometimes it gets set despite it fails with: Couldn't set charge limit: 'already_set'
+	  cmd "charge_limit_set",$wanted_soc or warn;
+	  $car->api_cache_clear;
+	  print "charge_limit_soc=";
+	  $charge_limit_soc=$car->charge_limit_soc;
+	  print "$charge_limit_soc\n";
+	  die "wanted_soc=$wanted_soc!=$charge_limit_soc=charge_limit_soc" if $wanted_soc!=$charge_limit_soc;
 	}
 	my sub change_amps($$) {
 	  my($charge_amps,$wanted)=@_;
-	  $charge_amps==$wanted or cmd "charge_amps_set",$wanted or die;
-	  $charge_amps=$wanted;
+	  return if $charge_amps==$wanted;
+	  # warn only, sometimes it gets set despite it fails with: Couldn't set charge limit: 'already_set'
+	  cmd "charge_amps_set",$wanted or warn;
+	  $car->api_cache_clear;
+	  print "charge_amps=";
+	  $charge_amps=$car->charge_amps;
+	  print "$charge_amps\n";
+	  die "wanted=$wanted!=$charge_amps=charge_amps" if $wanted!=$charge_amps;
 	}
 	if ($wanted>$charge_amps) {
 	  change_limit_soc($charge_limit_soc,$wanted_soc);
@@ -508,17 +567,6 @@ while (1) {
 	  change_amps($charge_amps,$wanted);
 	  change_limit_soc($charge_limit_soc,$wanted_soc);
 	}
-	$car->api_cache_clear;
-	print "charge_limit_soc=";
-	$charge_limit_soc=$car->charge_limit_soc;
-	print "$charge_limit_soc\n";
-	print "charge_amps=";
-	$charge_amps=$car->charge_amps;
-	print "$charge_amps\n";
-	my @err;
-	push @err,"wanted_soc=$wanted_soc!=$charge_limit_soc=charge_limit_soc" if $wanted_soc!=$charge_limit_soc;
-	push @err,"wanted=$wanted!=$charge_amps=charge_amps" if $wanted!=$charge_amps;
-	die "tesla settings failed, retrying: ".join(" && ",@err)."\n" if @err;
 	return 1;
       },3 or do { cmd "charge_limit_set",$BATTERY_LOW or warn "shutdown battery"; die "failed change"; };
       print "cmd";
