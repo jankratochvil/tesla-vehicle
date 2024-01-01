@@ -308,9 +308,6 @@ sub charging_state {
 sub minutes_to_full_charge {
     return $_[0]->data->{charge_state}{minutes_to_full_charge};
 }
-sub charge_port_latch {
-    return $_[0]->data->{charge_state}{charge_port_latch};
-}
 
 # Climate State Methods
 
@@ -1420,11 +1417,6 @@ Returns a string that identifies the state of the vehicle's charger. Eg.
 Returns an integer containing the estimated number of minutes to fully charge
 the batteries, taking into consideration voltage level, Amps requested and
 drawn etc.
-
-=head2 charge_port_latch
-
-Returns a string describing current state of the charge port.
-A plugged in charge will return "Engaged".
 
 =head1 CLIMATE STATE ATTRIBUTE METHODS
 

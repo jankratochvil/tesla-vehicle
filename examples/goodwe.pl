@@ -340,7 +340,7 @@ while (1) {
   print_timestamp();
   $tesla_timestamp||=time();
   BATTERY_refresh();
-  my($battery_level,$charge_limit_soc,$charging_state,$charge_amps,$charge_current_request,$charge_actual_current,$latitude,$longitude,$charge_port_latch,$charger_phases);
+  my($battery_level,$charge_limit_soc,$charging_state,$charge_amps,$charge_current_request,$charge_actual_current,$latitude,$longitude,$charger_phases);
   print "tesla fetch";
   my $t0=time();
   retry sub {
@@ -359,8 +359,6 @@ while (1) {
     $latitude=$car->latitude;
     print ".";
     $longitude=$car->longitude;
-    print ".";
-    $charge_port_latch=$car->charge_port_latch;
     print ".";
     $charger_phases=$car->charger_phases;
   };
@@ -393,7 +391,7 @@ while (1) {
   print "sunrise: "; print_timestamp($sunrise);
   print "sunset : "; print_timestamp($sunset );
   print "battery_level=$battery_level%\n";
-  print "charge_limit_soc=$charge_limit_soc% charge_amps=${charge_amps}A charger_phases=$charger_phases charge_port_latch=$charge_port_latch charging_state=$charging_state\n";
+  print "charge_limit_soc=$charge_limit_soc% charge_amps=${charge_amps}A charger_phases=$charger_phases charging_state=$charging_state\n";
   print "WARNING: charge_current_request=$charge_current_request!=$charge_amps=charge_amps\n" if $charge_current_request!=$charge_amps;
   die "Battery $battery_level<$BATTERY_CRITICAL=BATTERY_CRITICAL" if $battery_level<$BATTERY_CRITICAL;
   #die "Battery $battery_level>$BATTERY_HIGH=BATTERY_HIGH" if $battery_level>$BATTERY_HIGH;
@@ -408,7 +406,6 @@ while (1) {
   print "WARNING: charge_actual_current=$charge_actual_current!=0\n" if $charge_actual_current;
   # $charge_amps->$charge_actual_current? but $charge_actual_current==0
   my $amps_old=$charging?$charge_amps:0; # FIXME:simplify?
-  $charge_port_latch=0 if $charge_port_latch ne "Engaged";
   my $wanted;
   my $sleep;
   if ($charging_state eq "Stopped") {
@@ -428,7 +425,7 @@ while (1) {
     $wanted=0;
     $sleep=distance_time();
     print "Not at home.\n";
-  } elsif (!$charge_port_latch) {
+  } elsif ($charging_state eq "Disconnected") {
     $wanted=0;
     $sleep=60;
     print "At home but not plugged.\n";
@@ -471,7 +468,7 @@ while (1) {
     }
   }
   print "wanted=$wanted sleep=$sleep\n";
-  if ($at_home&&$charge_port_latch) {
+  if ($at_home&&$charging_state ne "Disconnected") {
     my $pv=0;
     if ($wanted) {
       my $data=data_retried();
