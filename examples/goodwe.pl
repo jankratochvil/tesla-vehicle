@@ -476,7 +476,7 @@ while (1) {
       $pv=~s/^(\d+(?:[.]\d+)?)[(]W[)]$/$1/ or die "pv=<$pv>!=\\d(W)";
       my $load=$data->{"powerflow"}{"load"};
       $load=~s/^(\d+(?:[.]\d+)?)[(]W[)]$/$1/ or die "load=<$load>!=\\d(W)";
-      my $inverter=$data->{"inverter"}[0] or die Dumper $data."\n!inverter";
+      my $inverter=$data->{"inverter"}[0] or die Dumper($data)."\n!inverter";
       my $soc=$inverter->{"soc"};
       $soc=~s/^(\d+)[%]$/$1/ or die "soc=<$soc>!=\\d%";
       my $amps_old_watt=amps_to_watt $amps_old;
@@ -486,7 +486,7 @@ while (1) {
       print " amps_old_watt_valid=$amps_old_watt_valid";
       print " (for ".int(time()-$amps_old_watt_valid_last)." seconds)" if !$amps_old_watt_valid;
       print " soc=${soc}%\n";
-      my $bms_status=$inverter->{"bms_status"} or die Dumper $data."\n!bms_status";
+      my $bms_status=$inverter->{"bms_status"} or die Dumper($data)."\n!bms_status";
       print "bms_status=$bms_status\n";
       my $bms_status_re="(?:StandbyOfBattery|ChargingOfBattery|DischargingOfBattery)"; # FIXME: when ""?
       $bms_status=~/^$bms_status_re$/o or print "WARNING: bms_status=$bms_status!~/$bms_status_re/\n";
@@ -495,7 +495,7 @@ while (1) {
       $battery_power=int($battery_power);
       print " -> ${battery_power}W\n";
       my $pmeter=$inverter->{"invert_full"}{"pmeter"};
-      die Dumper $data."\n!pmeter" if !defined $pmeter;
+      die Dumper($data)."\n!pmeter" if !defined $pmeter;
       $pmeter=sprintf "%+d",$pmeter;
       my $pmeter_real=$pmeter;
       $pmeter_real+=$amps_old_watt if $amps_old_watt_valid;;
